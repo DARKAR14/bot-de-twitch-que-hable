@@ -4,6 +4,7 @@
 
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 
@@ -138,7 +139,7 @@ server.listen(CONFIG.PUERTO, () => {
 // ── Mantener activo en Render ──────────────────────────────────
 if (CONFIG.APP_URL) {
   setInterval(() => {
-    http.get(CONFIG.APP_URL, (res) => {
+    https.get(CONFIG.APP_URL, (res) => {
       console.log(`🏓 Ping propio: ${res.statusCode}`);
     }).on('error', (err) => {
       console.error('❌ Ping fallido:', err.message);
