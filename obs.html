@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>TTS Bot - OBS</title>
+  <style>
+    @font-face {
+      font-family: "MiFuente";
+      src: url("/font/njnaruto.ttf") format("truetype");
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: transparent;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-start;
+      min-height: 100vh;
+      padding: 30px;
+      font-family: 'MiFuente', sans-serif;
+      overflow: hidden;
+    }
+
+    #notificacion {
+      display: none;
+      position: relative;
+      align-items: center;
+      gap: 14px;
+      background: rgba(10, 10, 20, 0.92);
+      border: 2px solid #ea8352;
+      border-radius: 16px;
+      padding: 14px 22px;
+      max-width: 520px;
+      box-shadow: 0 0 30px rgba(162, 89, 255, 0.35), 0 4px 20px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(12px);
+    }
+
+    #notificacion.entrando {
+      animation: slideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    #notificacion.saliendo {
+      animation: slideOut 0.4s ease-in forwards;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(30px) scale(0.95);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @keyframes slideOut {
+      from {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
+      to {
+        opacity: 0;
+        transform: translateY(20px) scale(0.95);
+      }
+    }
+
+    .icono {
+      font-size: 32px;
+      flex-shrink: 0;
+    }
+
+    .icono img {
+      width: 80px;
+      height: 80px;
+      animation: pulso 1s ease-in-out infinite alternate;
+    }
+
+    @keyframes pulso {
+      from {
+        transform: scale(1);
+      }
+
+      to {
+        transform: scale(1.15);
+      }
+    }
+
+    .contenido {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      flex: 1;
+    }
+
+    .usuario {
+      font-family: 'MiFuente', sans-serif;
+      font-size: 18px;
+      letter-spacing: 1.5px;
+      color: #eb8352;
+    }
+
+    .mensaje {
+      font-size: 15px;
+      color: #f0f0f0;
+      line-height: 1.4;
+    }
+
+    .cola-badge {
+      font-size: 11px;
+      color: #888;
+      margin-top: 2px;
+    }
+
+    .barra {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #eb8352, #ea8352);
+      border-radius: 0 0 14px 14px;
+      width: 100%;
+      transform-origin: left;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="notificacion">
+    <div class="icono">
+      <img src="/svg/svgviewer-output.svg"/>
+    </div>
+    <div class="contenido">
+      <span class="usuario" id="usuario">usuario</span>
+      <span class="mensaje" id="mensaje">mensaje</span>
+      <span class="cola-badge" id="cola-badge"></span>
+    </div>
+    <div class="barra" id="barra"></div>
+  </div>
+
+  <script>
+    const notif = document.getElementById('notificacion');
+    const elUsuario = document.getElementById('usuario');
+    const elMensaje = document.getElementById('mensaje');
+    const elBadge = document.getElementById('cola-badge');
+    const elBarra = document.getElementById('barra');
+
+    // Cola local en el navegador (por si llegan varios a la vez)
+    let colaLocal = [];
+    let reproduciendo = false;
+
+    // ── WebSocket ────────────────────────────────────────────────
+    let ws;
+    let wsReconectando = false;
+
+    function conectarWS() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      // ngrok-skip-browser-warning se pasa como query param para WS
+      ws = new WebSocket(`${proto}://${location.host}?ngrok-skip-browser-warning=true`);
+
+      ws.onopen = () => {
+        wsReconectando = false;
+        console.log('WS conectado');
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.tipo === 'nuevo') {
+            colaLocal.push(data);
+            if (!reproduciendo) reproducirSiguiente();
+          }
+        } catch (e) { /* ignorar */ }
+      };
+
+      ws.onclose = () => {
+        console.warn('WS cerrado, reconectando en 3s...');
+        if (!wsReconectando) {
+          wsReconectando = true;
+          setTimeout(conectarWS, 3000);
+        }
+      };
+
+      ws.onerror = () => ws.close();
+    }
+
+    // ── TTS ──────────────────────────────────────────────────────
+    function reproducirSiguiente() {
+      if (colaLocal.length === 0) {
+        reproduciendo = false;
+        return;
+      }
+
+      reproduciendo = true;
+      const entrada = colaLocal.shift();
+      reproducir(entrada);
+    }
+
+    function reproducir({ id, usuario, mensaje, audioBase64 }) {
+      elUsuario.textContent = usuario;
+      elMensaje.textContent = mensaje;
+      elBadge.textContent = colaLocal.length > 0 ? `+${colaLocal.length} en cola` : '';
+
+      notif.style.display = 'flex';
+      notif.classList.remove('saliendo');
+      notif.classList.add('entrando');
+
+      const alTerminar = () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ tipo: 'terminado', id }));
+        }
+        notif.classList.remove('entrando');
+        notif.classList.add('saliendo');
+        setTimeout(() => {
+          notif.style.display = 'none';
+          elBarra.style.transition = '';
+          elBarra.style.transform = 'scaleX(1)';
+          reproducirSiguiente();
+        }, 400);
+      };
+
+      if (audioBase64) {
+        // ── Reproducir MP3 como base64 ───────────────────────────
+        const audioSrc = `data:audio/mp3;base64,${audioBase64}`;
+        const audioEl = new Audio(audioSrc);
+        audioEl.volume = 1;
+
+        // OBS bloquea autoplay con sonido, trick: empezar muteado y desmutear
+        audioEl.muted = true;
+        audioEl.addEventListener('canplaythrough', () => {
+          audioEl.muted = false;
+        });
+
+        audioEl.addEventListener('loadedmetadata', () => {
+          const duracion = audioEl.duration * 1000;
+          elBarra.style.transition = `transform ${duracion}ms linear`;
+          void elBarra.offsetWidth;
+          elBarra.style.transform = 'scaleX(0)';
+        });
+
+        audioEl.addEventListener('ended', alTerminar);
+        audioEl.addEventListener('error', (e) => {
+          console.warn('Error reproduciendo audio:', e);
+          alTerminar();
+        });
+
+        audioEl.play().catch((e) => {
+          console.warn('Play falló:', e);
+          alTerminar();
+        });
+
+      } else {
+        usarFallbackTTS(mensaje, alTerminar);
+      }
+    }
+
+    function usarFallbackTTS(mensaje, alTerminar) {
+      const duracion = Math.max(2000, mensaje.length * 75);
+      elBarra.style.transition = `transform ${duracion}ms linear`;
+      void elBarra.offsetWidth;
+      elBarra.style.transform = 'scaleX(0)';
+
+      const utterance = new SpeechSynthesisUtterance(mensaje);
+      utterance.lang = 'es-ES';
+      utterance.rate = 1.05;
+      const timeout = setTimeout(alTerminar, duracion + 2000);
+      utterance.onend = () => { clearTimeout(timeout); alTerminar(); };
+      utterance.onerror = alTerminar;
+      window.speechSynthesis.speak(utterance);
+    }
+
+    conectarWS();
+  </script>
+</body>
+
+</html>
