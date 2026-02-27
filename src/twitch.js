@@ -38,7 +38,7 @@ async function manejarMensaje(channel, tags, message, self) {
     if (esSpam) {
       console.log(`🚫 Bot detectado: ${usuario} — "${msg.slice(0, 60)}"`);
       await antibot.registrarBaneo(usuario, msg, 'patrón detectado');
-      client.ban(channel, usuario, 'Bot de spam detectado automáticamente').catch(() => {});
+      client.say(channel, `/ban ${usuario} Bot de spam detectado automáticamente`).catch(() => {});
       return;
     }
   }
