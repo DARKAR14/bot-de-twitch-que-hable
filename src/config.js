@@ -1,5 +1,5 @@
 // ============================================
-//  config.js - Configuración central del bot
+//  config.js - Configuración central del bot.
 // ============================================
 
 module.exports = {
