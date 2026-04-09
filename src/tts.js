@@ -1,5 +1,5 @@
 // ============================================
-//  tts.js - Google Translate TTS (gratis, sin API key)
+//  tts.js - Google Translate TTS (gratis, sin API key).
 // ============================================
 
 const https = require("https");
