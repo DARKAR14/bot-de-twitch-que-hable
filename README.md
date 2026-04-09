@@ -1,4 +1,4 @@
-# 🎙️ BOT !habla — TTS para Twitch + OBS
+# 🎙️ BOT !habla — TTS para Twitch + OBS.
 
 Bot de Text-to-Speech para Twitch que convierte mensajes del chat en audio y los muestra como overlay animado en OBS Studio.
 
