@@ -1,5 +1,5 @@
 // ============================================
-//  twitch.js - Conexión y lógica del bot
+//  twitch.js - Conexión y lógica del bot.
 // ============================================
 
 const tmi = require("tmi.js");

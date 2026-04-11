@@ -1,5 +1,5 @@
 // ============================================
-//  config.js - Configuración central + validación
+//  config.js - Configuración central del bot.
 // ============================================
 
 require("dotenv").config();
@@ -10,12 +10,8 @@ const log = createLogger("CONFIG");
 const CONFIG = {
   // --- Twitch ---
   BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot", // Cuenta Twitch del bot
-  BOT_TOKEN: process.env.BOT_TOKEN || "oauth:zsxutxjqdkc3atz8v0s54eprfol3aq", // twitchapps.com/tmi
-  CANAL: process.env.CANAL || "Nerokxmal",
-  MONGODB_URI:
-    process.env.MONGODB_URI ||
-    "mongodb+srv://yosoyguitar7:Japon1419@database.4sqih.mongodb.net/antibot", // MongoDB Atlas connection string
-  MONGODB_DB: process.env.MONGODB_DB || "hablabot",
+  BOT_TOKEN: process.env.BOT_TOKEN || "", // twitchapps.com/tmi
+  CANAL: process.env.CANAL || "", // Sin el #
 
   // --- Servidor ---
   PUERTO: parseInt(process.env.PUERTO) || 3000,
