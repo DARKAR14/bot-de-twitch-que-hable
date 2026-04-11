@@ -8,14 +8,23 @@ const queue = require("./queue");
 const ws = require("./websocket");
 const tts = require("./tts");
 const antibot = require("./antibot");
+const { createLogger } = require("./logger");
 
+const log = createLogger("TWITCH");
+
+// Cooldown compartido entre todos los comandos TTS por usuario
 const cooldowns = new Map();
+
+// Contador de pajas por usuario (se resetea al reiniciar el bot)
+const pajas = new Map();
+
 let client = null;
+let intentoReconexion = 0;
 
 function crearCliente() {
   return new tmi.Client({
     options: { debug: false },
-    connection: { reconnect: true, secure: true },
+    connection: { reconnect: false, secure: true },
     identity: {
       username: CONFIG.BOT_USERNAME,
       password: CONFIG.BOT_TOKEN,
@@ -23,6 +32,15 @@ function crearCliente() {
     channels: [CONFIG.CANAL],
   });
 }
+
+// Backoff exponencial: 3s → 6s → 12s → 24s → máx 60s
+function calcularDelayReconexion() {
+  const delay = Math.min(3000 * Math.pow(2, intentoReconexion), 60000);
+  intentoReconexion++;
+  return delay;
+}
+
+// ── Manejador de mensajes ──────────────────────────────────────
 
 async function manejarMensaje(channel, tags, message, self) {
   if (self) return;
@@ -32,11 +50,11 @@ async function manejarMensaje(channel, tags, message, self) {
   const esMod = tags.mod || tags.badges?.broadcaster;
   const esSub = tags.subscriber || esMod;
 
-  // ── Antibot: revisar TODOS los mensajes del chat ────────────
+  // ── Antibot ──────────────────────────────────────────────────
   if (CONFIG.MONGODB_URI) {
     const esSpam = await antibot.esBot(msg);
     if (esSpam) {
-      console.log(`🚫 Bot detectado: ${usuario} — "${msg.slice(0, 60)}"`);
+      log.warn(`Bot detectado: ${usuario} — "${msg.slice(0, 60)}"`);
       await antibot.registrarBaneo(usuario, msg, "patrón detectado");
       client
         .say(channel, `/ban ${usuario} Bot de spam detectado automáticamente`)
@@ -45,29 +63,80 @@ async function manejarMensaje(channel, tags, message, self) {
     }
   }
 
-  // ── Comando !addbot (solo mods) ─────────────────────────────
+  // ── Comandos de moderación ────────────────────────────────────
   if (msg.toLowerCase().startsWith("!addbot ") && esMod) {
     const patron = msg.slice(8).trim();
     if (patron) {
       const ok = await antibot.agregarPatron(patron);
       if (ok)
         client
-          .say(channel, `✅ Patrón "${patron}" agregado a la lista antibot`)
+          .say(channel, `✅ Patrón "${patron}" agregado al antibot`)
           .catch(() => {});
     }
     return;
   }
 
-  // ── Detectar qué comando se usó ─────────────────────────────
+  if (msg.toLowerCase() === "!cola" && esMod) {
+    const { total, usuariosUnicos, porIdioma } = queue.stats();
+    const resumen =
+      total === 0
+        ? "📭 La cola está vacía"
+        : `📋 Cola: ${total} msg | ${usuariosUnicos} usuarios | 🇪🇸${porIdioma.es || 0} 🇺🇸${porIdioma.en || 0} 🇯🇵${porIdioma.ja || 0} 🇷🇺${porIdioma.ru || 0} 🇧🇷${porIdioma.pt || 0}`;
+    client.say(channel, resumen).catch(() => {});
+    return;
+  }
+
+  if (msg.toLowerCase() === "!limpiar" && esMod) {
+    queue.limpiar();
+    client.say(channel, "🧹 Cola limpiada").catch(() => {});
+    return;
+  }
+
+  // ── !paja — número aleatorio de pajas entre 0 y 99 ───────────
+  if (msg.toLowerCase() === "!paja") {
+    const cantidad = Math.floor(Math.random() * 100); // 0 a 99
+    const anterior = pajas.get(usuario) || 0;
+    pajas.set(usuario, cantidad);
+
+    let texto;
+    if (cantidad === 0) {
+      texto = `@${usuario} hoy está en modo monje, 0 pajas 🧘`;
+    } else if (cantidad === 99) {
+      texto = `@${usuario} se hizo 99 pajas hoy... busca ayuda 💀`;
+    } else if (cantidad > anterior) {
+      texto = `@${usuario} se hizo ${cantidad} pajas hoy 🥴`;
+    } else {
+      texto = `@${usuario} se hizo ${cantidad} pajas hoy, menos que antes 😐`;
+    }
+
+    client.say(channel, texto).catch(() => {});
+    log.info(`!paja | ${usuario}: ${cantidad}`);
+    return;
+  }
+
+  // ── Detectar comando TTS ──────────────────────────────────────
   const msgLower = msg.toLowerCase();
-  const esHabla = msgLower.startsWith(CONFIG.PREFIJO_COMANDO);
-  const esSpeak = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_EN);
+  const esES = msgLower.startsWith(CONFIG.PREFIJO_COMANDO);
+  const esEN = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_EN);
+  const esJP = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_JP);
+  const esRU = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_RU);
+  const esPT = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_PT);
 
-  if (!esHabla && !esSpeak) return;
+  if (!esES && !esEN && !esJP && !esRU && !esPT) return;
 
-  const idioma = esSpeak ? "en" : "es";
-  const prefijo = esSpeak ? CONFIG.PREFIJO_COMANDO_EN : CONFIG.PREFIJO_COMANDO;
-  const flag = idioma === "es" ? "🇪🇸" : "🇺🇸";
+  const idioma = esEN ? "en" : esJP ? "ja" : esRU ? "ru" : esPT ? "pt" : "es";
+
+  const prefijo = esEN
+    ? CONFIG.PREFIJO_COMANDO_EN
+    : esJP
+      ? CONFIG.PREFIJO_COMANDO_JP
+      : esRU
+        ? CONFIG.PREFIJO_COMANDO_RU
+        : esPT
+          ? CONFIG.PREFIJO_COMANDO_PT
+          : CONFIG.PREFIJO_COMANDO;
+
+  const flags = { es: "🇪🇸", en: "🇺🇸", ja: "🇯🇵", ru: "🇷🇺", pt: "🇧🇷" };
 
   // Permiso de sub
   if (CONFIG.SOLO_SUBS && !esSub) {
@@ -80,7 +149,7 @@ async function manejarMensaje(channel, tags, message, self) {
     return;
   }
 
-  // Cooldown (mods sin cooldown)
+  // Cooldown compartido entre TODOS los comandos TTS
   if (!esMod) {
     const ahora = Date.now();
     const ultimoUso = cooldowns.get(usuario) || 0;
@@ -109,15 +178,10 @@ async function manejarMensaje(channel, tags, message, self) {
     return;
   }
 
-  // Limpiar letras repetidas (AAAAAAA → AAAA)
   texto = antibot.limpiarRepeticiones(texto, 4);
-
-  // Cortar si excede el máximo
-  if (texto.length > CONFIG.MAX_CARACTERES) {
+  if (texto.length > CONFIG.MAX_CARACTERES)
     texto = texto.slice(0, CONFIG.MAX_CARACTERES);
-  }
 
-  // Límite de cola
   if (queue.total() >= CONFIG.MAX_COLA) {
     client
       .say(channel, `@${usuario} la cola está llena. Espera un momento.`)
@@ -125,10 +189,10 @@ async function manejarMensaje(channel, tags, message, self) {
     return;
   }
 
-  // Agregar a cola y generar audio
-  console.log(`${flag} ${prefijo} | ${usuario}: "${texto}"`);
   const esPrimero = queue.total() === 0;
-  const entrada = queue.agregar({ usuario, mensaje: texto });
+  const entrada = queue.agregar({ usuario, mensaje: texto, idioma });
+
+  log.info(`${flags[idioma]} ${prefijo} | ${usuario}: "${texto}"`);
 
   tts
     .generarAudio(texto, idioma)
@@ -138,31 +202,38 @@ async function manejarMensaje(channel, tags, message, self) {
       if (esPrimero) ws.enviar({ tipo: "nuevo", ...entrada, audioBase64 });
     })
     .catch((err) => {
-      console.error("❌ Error generando TTS:", err.message);
+      log.error(`Error generando TTS para ${usuario}`, err.message);
       if (esPrimero)
         ws.enviar({ tipo: "nuevo", ...entrada, audioBase64: null });
     });
 }
+
+// ── Conexión con backoff exponencial ──────────────────────────
 
 function conectar() {
   client = crearCliente();
   client.on("message", manejarMensaje);
 
   client.on("connected", (addr, port) => {
-    console.log(`✅ Bot conectado a Twitch — ${addr}:${port}`);
-    console.log(`📺 Canal: #${CONFIG.CANAL}`);
-    console.log(
-      `🎙️  Comandos: ${CONFIG.PREFIJO_COMANDO} (español) | ${CONFIG.PREFIJO_COMANDO_EN} (inglés)`,
-    );
+    intentoReconexion = 0;
+    log.info(`Bot conectado a Twitch — ${addr}:${port}`);
+    log.info(`Canal: #${CONFIG.CANAL}`);
   });
 
   client.on("disconnected", (reason) => {
-    console.warn(`⚠️  Bot desconectado: ${reason}`);
+    const delay = calcularDelayReconexion();
+    log.warn(
+      `Bot desconectado: ${reason}. Reintentando en ${delay / 1000}s...`,
+    );
+    setTimeout(conectar, delay);
   });
 
   client.connect().catch((err) => {
-    console.error("❌ Error conectando bot:", err.message);
-    setTimeout(conectar, 10000);
+    const delay = calcularDelayReconexion();
+    log.error(
+      `Error conectando: ${err.message}. Reintentando en ${delay / 1000}s...`,
+    );
+    setTimeout(conectar, delay);
   });
 }
 
