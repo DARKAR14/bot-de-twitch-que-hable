@@ -25,7 +25,7 @@ dirs.forEach((dir) => {
 const CONFIG = require("./src/config");
 CONFIG.validate();
 
-const queue = require("./src/queue");
+const mongoQueue = require("./src/mongoQueue");
 const ws = require("./src/websocket");
 const twitch = require("./src/twitch");
 const tts = require("./src/tts");
@@ -54,17 +54,17 @@ app.use("/font", express.static(path.join(__dirname, "font")));
 app.use("/svg", express.static(path.join(__dirname, "svg")));
 
 app.get("/cola", (req, res) => {
-  res.json({ total: queue.total(), mensajes: queue.leer() });
+  res.json({ total: mongoQueue.total(), mensajes: mongoQueue.leer() });
 });
 
 app.delete("/cola", (req, res) => {
-  queue.limpiar();
+  mongoQueue.limpiar();
   res.json({ ok: true });
 });
 
 app.get("/stats", (req, res) => {
   res.json({
-    cola: queue.stats(),
+    cola: mongoQueue.stats(),
     websocket: ws.estadisticas(),
   });
 });
@@ -74,79 +74,100 @@ ws.inicializar(server);
 
 ws.alTerminar((id) => {
   log.info(`TTS terminado, eliminando ID: ${id}`);
-  const entrada = queue.leer().find((e) => e.id === id);
-  queue.eliminar(id);
+  mongoQueue.eliminar(id);
 
-  setTimeout(() => {
-    const siguiente = queue.obtenerPrimero();
+  setTimeout(async () => {
+    const siguiente = await mongoQueue.obtenerPrimero();
     if (!siguiente) return log.info("Cola vacía");
 
     log.info(`Enviando siguiente: ${siguiente.usuario}`);
 
     if (siguiente.rutaAudio) {
       const audioBase64 = tts.audioABase64(siguiente.rutaAudio);
+      await mongoQueue.marcarComoeproduciendo(siguiente.id);
       ws.enviar({ tipo: "nuevo", ...siguiente, audioBase64 });
     } else {
       log.info("Esperando audio del siguiente...");
-      const esperar = setInterval(() => {
-        const actualizado = queue.leer().find((e) => e.id === siguiente.id);
+      const esperar = setInterval(async () => {
+        const actualizado = await mongoQueue.obtenerPrimero();
         if (actualizado?.rutaAudio) {
           clearInterval(esperar);
           const audioBase64 = tts.audioABase64(actualizado.rutaAudio);
+          await mongoQueue.marcarComoeproduciendo(actualizado.id);
           ws.enviar({ tipo: "nuevo", ...actualizado, audioBase64 });
         }
       }, 200);
       setTimeout(() => clearInterval(esperar), 10000);
     }
-
-    // Borrar el audio DESPUÉS de enviar el siguiente
-    // Si otro mensaje en cola usa el mismo archivo (mensajes idénticos),
-    // no lo borramos para evitar el error ENOENT
-    if (entrada?.rutaAudio) {
-      const colaActual = queue.leer();
-      const enUso = colaActual.some(
-        (e) => e.id !== id && e.rutaAudio === entrada.rutaAudio,
-      );
-      if (!enUso) tts.eliminarAudio(entrada.rutaAudio);
-    }
   }, 300);
 });
 
-ws.alConectar(() => {
-  const primero = queue.obtenerPrimero();
+ws.alConectar(async () => {
+  const primero = await mongoQueue.obtenerPrimero();
   if (primero) {
     log.info(`OBS conectó, enviando mensaje pendiente: ${primero.usuario}`);
     const audioBase64 = primero.rutaAudio
       ? tts.audioABase64(primero.rutaAudio)
       : null;
+    if (primero.rutaAudio) {
+      await mongoQueue.marcarComoeproduciendo(primero.id);
+    }
     ws.enviar({ tipo: "nuevo", ...primero, audioBase64 });
   }
 });
 
 // ── Inicializar ────────────────────────────────────────────────
-queue.inicializar();
-antibot.conectar();
+(async () => {
+  try {
+    await mongoQueue.conectar();
+    antibot.conectar();
 
-const pendientes = queue.total();
-if (pendientes > 0) {
-  log.warn(
-    `${pendientes} mensajes pendientes de la sesión anterior — limpiando...`,
-  );
-  queue.limpiar();
-}
+    const pendientes = await mongoQueue.total();
+    if (pendientes > 0) {
+      log.warn(
+        `${pendientes} mensajes pendientes de la sesión anterior — limpiando...`,
+      );
+      await mongoQueue.limpiar();
+    }
 
-// ── Arrancar servidor ──────────────────────────────────────────
-server.listen(CONFIG.PUERTO, () => {
-  const urlPublica = CONFIG.APP_URL || `http://localhost:${CONFIG.PUERTO}`;
-  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  🎙️  BOT !habla arriba y corriendo");
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log(`  🌐  Servidor:  ${urlPublica}`);
-  console.log(`  📋  Cola:      ${urlPublica}/cola`);
-  console.log(`  📊  Stats:     ${urlPublica}/stats`);
-  console.log(`  📺  OBS URL:   ${urlPublica}`);
-  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-});
+    // ── Arrancar servidor con comprobación de puerto libre ─────
+    const net = require("net");
+    let portToTry = CONFIG.PUERTO || 3000;
+    const maxAttempts = 5;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      // probar si el puerto está libre
+      // crea un servidor temporal y escucha; si falla, probar siguiente puerto
+      // eslint-disable-next-line no-await-in-loop
+      const free = await new Promise((resolve) => {
+        const tester = net
+          .createServer()
+          .once("error", () => resolve(false))
+          .once("listening", () => tester.close(() => resolve(true)))
+          .listen(portToTry);
+      });
+
+      if (free) break;
+      log.warn(`Puerto ${portToTry} en uso, intentando ${portToTry + 1}...`);
+      portToTry += 1;
+    }
+
+    server.listen(portToTry, () => {
+      const urlPublica = CONFIG.APP_URL || `http://localhost:${portToTry}`;
+      console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log("  🎙️  BOT !habla arriba y corriendo");
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+      console.log(`  🌐  Servidor:  ${urlPublica}`);
+      console.log(`  📋  Cola:      ${urlPublica}/cola`);
+      console.log(`  📊  Stats:     ${urlPublica}/stats`);
+      console.log(`  📺  OBS URL:   ${urlPublica}`);
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    });
+  } catch (err) {
+    log.error("Error en inicialización", err.message);
+    process.exit(1);
+  }
+})();
 
 // ── Ping propio (solo en producción en la nube) ────────────────
 if (CONFIG.APP_URL) {
