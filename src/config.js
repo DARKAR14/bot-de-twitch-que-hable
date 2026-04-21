@@ -9,9 +9,12 @@ const log = createLogger("CONFIG");
 
 const CONFIG = {
   // --- Twitch ---
+
   BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot", // Cuenta Twitch del bot
   BOT_TOKEN: process.env.BOT_TOKEN || "", // twitchapps.com/tmi
   CANAL: process.env.CANAL || "", // Sin el #
+  MONGODB_URI: process.env.MONGODB_URI || "",
+  MONGODB_DB: process.env.MONGODB_DB || "hablabot",
 
   // --- Servidor ---
   PUERTO: parseInt(process.env.PUERTO) || 3000,

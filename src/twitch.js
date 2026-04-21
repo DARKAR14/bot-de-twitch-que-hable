@@ -4,7 +4,7 @@
 
 const tmi = require("tmi.js");
 const CONFIG = require("./config");
-const queue = require("./queue");
+const mongoQueue = require("./mongoQueue");
 const ws = require("./websocket");
 const tts = require("./tts");
 const antibot = require("./antibot");
@@ -77,7 +77,8 @@ async function manejarMensaje(channel, tags, message, self) {
   }
 
   if (msg.toLowerCase() === "!cola" && esMod) {
-    const { total, usuariosUnicos, porIdioma } = queue.stats();
+    const stats = await mongoQueue.stats();
+    const { total, usuariosUnicos, porIdioma } = stats;
     const resumen =
       total === 0
         ? "📭 La cola está vacía"
@@ -87,7 +88,7 @@ async function manejarMensaje(channel, tags, message, self) {
   }
 
   if (msg.toLowerCase() === "!limpiar" && esMod) {
-    queue.limpiar();
+    await mongoQueue.limpiar();
     client.say(channel, "🧹 Cola limpiada").catch(() => {});
     return;
   }
@@ -182,24 +183,32 @@ async function manejarMensaje(channel, tags, message, self) {
   if (texto.length > CONFIG.MAX_CARACTERES)
     texto = texto.slice(0, CONFIG.MAX_CARACTERES);
 
-  if (queue.total() >= CONFIG.MAX_COLA) {
+  const totalEnCola = await mongoQueue.total();
+  if (totalEnCola >= CONFIG.MAX_COLA) {
     client
       .say(channel, `@${usuario} la cola está llena. Espera un momento.`)
       .catch(() => {});
     return;
   }
 
-  const esPrimero = queue.total() === 0;
-  const entrada = queue.agregar({ usuario, mensaje: texto, idioma });
+  const esPrimero = totalEnCola === 0;
+  const entrada = await mongoQueue.agregarMensaje({
+    usuario,
+    mensaje: texto,
+    idioma,
+  });
 
   log.info(`${flags[idioma]} ${prefijo} | ${usuario}: "${texto}"`);
 
   tts
     .generarAudio(texto, idioma)
-    .then((rutaAudio) => {
+    .then(async (rutaAudio) => {
       const audioBase64 = tts.audioABase64(rutaAudio);
-      queue.actualizarAudio(entrada.id, rutaAudio);
-      if (esPrimero) ws.enviar({ tipo: "nuevo", ...entrada, audioBase64 });
+      await mongoQueue.actualizarAudio(entrada.id, rutaAudio, audioBase64);
+      if (esPrimero) {
+        await mongoQueue.marcarComoeproduciendo(entrada.id);
+        ws.enviar({ tipo: "nuevo", ...entrada, audioBase64 });
+      }
     })
     .catch((err) => {
       log.error(`Error generando TTS para ${usuario}`, err.message);
