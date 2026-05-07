@@ -1,5 +1,5 @@
 // ============================================
-//  config.js - Configuración central del bot.
+//   config.js - Configuración central del bot.
 // ============================================
 
 require("dotenv").config();
@@ -9,16 +9,21 @@ const log = createLogger("CONFIG");
 
 const CONFIG = {
   // --- Twitch ---
-
-  BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot", // Cuenta Twitch del bot
-  BOT_TOKEN: process.env.BOT_TOKEN || "", // twitchapps.com/tmi
-  CANAL: process.env.CANAL || "", // Sin el #
+  BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot",
+  BOT_TOKEN: process.env.BOT_TOKEN || "",
+  CANAL: process.env.CANAL || "",
   MONGODB_URI: process.env.MONGODB_URI || "",
   MONGODB_DB: process.env.MONGODB_DB || "hablabot",
 
   // --- Servidor ---
   PUERTO: parseInt(process.env.PUERTO) || 3000,
   APP_URL: process.env.APP_URL || null,
+
+  // --- Render API (NUEVO) ---
+  RENDER: {
+    API_KEY: process.env.RENDER_API_KEY || null,
+    SERVICE_ID: process.env.RENDER_SERVICE_ID || null,
+  },
 
   // --- Comandos TTS por idioma ---
   PREFIJO_COMANDO: "!habla", // 🇪🇸 Español
@@ -36,7 +41,7 @@ const CONFIG = {
   // --- MongoDB (antibot) ---
   MONGODB_URI: process.env.MONGODB_URI || "",
   MONGODB_DB: process.env.MONGODB_DB || "hablabot",
-
+  
   // --- TTS ---
   TTS_RATE: parseFloat(process.env.TTS_RATE) || 1.05,
   TTS_PITCH: parseFloat(process.env.TTS_PITCH) || 1,
@@ -59,6 +64,13 @@ function validate() {
     log.warn("MONGODB_URI no configurado — antibot desactivado");
   if (!CONFIG.APP_URL)
     log.warn("APP_URL no configurado — ping propio desactivado");
+
+  // Validación para el control de Render
+  if (!CONFIG.RENDER.API_KEY || !CONFIG.RENDER.SERVICE_ID) {
+    log.warn("RENDER_API_KEY o RENDER_SERVICE_ID no configurados — Control de instancia desactivado");
+  } else {
+    log.info("Control de instancia Render: Habilitado");
+  }
 
   log.info(`Canal: #${CONFIG.CANAL} | Puerto: ${CONFIG.PUERTO}`);
   log.info(
