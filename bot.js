@@ -8,18 +8,19 @@ const cors = require("cors");
 const { Server } = require("ws");
 const https = require("https");
 
-// Importación de módulos internos (según tu estructura de carpetas)
+// Importación de módulos internos
 const CONFIG = require("./src/config");
 const { createLogger } = require("./src/logger");
 const twitch = require("./src/twitch");
-const mongoQueue = require("./src/mongoQueue"); // O el gestor de cola que uses
+const mongoQueue = require("./src/mongoQueue");
 const websocket = require("./src/websocket");
 
 // ── Inicialización ─────────────────────────────────────────────
-CONFIG.validate(); // Valida variables de entorno al arrancar
+CONFIG.validate();
 const log = createLogger("SERVER");
 const app = express();
 
+// Middlewares críticos
 app.use(cors());
 app.use(express.json());
 
@@ -31,7 +32,7 @@ websocket.init(wss);
 
 // ── Endpoints de la API ────────────────────────────────────────
 
-// Obtener cola actual y stats
+// 1. Obtener cola actual y stats
 app.get("/cola", async (req, res) => {
   try {
     const mensajes = await mongoQueue.getCola();
@@ -42,7 +43,7 @@ app.get("/cola", async (req, res) => {
   }
 });
 
-// Stats del Bot (Uptime, clientes conectados, etc)
+// 2. Stats del Bot (Uptime, clientes conectados, etc)
 app.get("/stats", (req, res) => {
   res.json({
     uptime: process.uptime(),
@@ -51,7 +52,7 @@ app.get("/stats", (req, res) => {
   });
 });
 
-// Limpiar cola (Desde el panel)
+// 3. Limpiar cola (Desde el panel)
 app.delete("/cola", async (req, res) => {
   try {
     await mongoQueue.limpiarCola();
@@ -62,7 +63,7 @@ app.delete("/cola", async (req, res) => {
   }
 });
 
-// Marcar como reproducido (Desde OBS)
+// 4. Marcar como reproducido (Desde OBS)
 app.put("/tts/:id/play", async (req, res) => {
   try {
     await mongoQueue.marcarReproducido(req.params.id);
@@ -72,13 +73,13 @@ app.put("/tts/:id/play", async (req, res) => {
   }
 });
 
-// ── Endpoint Administrativo para Render ────────────────────────
+// ── NUEVO: Endpoint Administrativo para Render ─────────────────
 app.post("/admin/servicio/:accion", async (req, res) => {
   const { accion } = req.params;
   const { API_KEY, SERVICE_ID } = CONFIG.RENDER;
 
   if (!API_KEY || !SERVICE_ID) {
-    log.warn("Intento de control de servicio sin API KEY configurada.");
+    log.warn("RENDER_API_KEY o SERVICE_ID no definidos.");
     return res.status(503).json({ error: "Servicio de Render no configurado" });
   }
 
@@ -88,7 +89,8 @@ app.post("/admin/servicio/:accion", async (req, res) => {
     resume: `https://api.render.com/v1/services/${SERVICE_ID}/resume`,
   };
 
-  if (!endpoints[accion]) return res.status(400).json({ error: "Acción inválida" });
+  if (!endpoints[accion])
+    return res.status(400).json({ error: "Acción inválida" });
 
   try {
     const response = await fetch(endpoints[accion], {
@@ -101,62 +103,64 @@ app.post("/admin/servicio/:accion", async (req, res) => {
     });
 
     if (response.ok) {
-      log.info(`Orden de ${accion.toUpperCase()} enviada a Render API.`);
+      log.info(`Comando ${accion.toUpperCase()} enviado a Render API.`);
       res.json({ status: "success", message: `Acción ${accion} procesada` });
     } else {
       const errorData = await response.json();
-      log.error(`Render API falló: ${JSON.stringify(errorData)}`);
-      res.status(response.status).json({ error: "Render API Error", details: errorData });
+      res
+        .status(response.status)
+        .json({ error: "Render API Error", details: errorData });
     }
   } catch (err) {
-    log.error(`Error de red con Render: ${err.message}`);
     res.status(500).json({ error: "Network Error", details: err.message });
   }
 });
 
-// ── Lógica de Inicio ───────────────────────────────────────────
+// ── Lógica de Inicio del Bot ───────────────────────────────────
 
 (async () => {
   try {
-    // 1. Conectar a Base de Datos
+    // 1. Conectar a MongoDB
     await mongoQueue.conectar();
-    log.info("Conexión a base de datos establecida.");
+    log.info("MongoDB conectado correctamente.");
 
     // 2. Iniciar Servidor HTTP
-    let portToTry = CONFIG.PUERTO;
-    server.listen(portToTry, () => {
-      const urlPublica = CONFIG.APP_URL || `http://localhost:${portToTry}`;
+    server.listen(CONFIG.PUERTO, () => {
+      const urlPublica = CONFIG.APP_URL || `http://localhost:${CONFIG.PUERTO}`;
       console.log("\n-------------------------------------------");
       console.log(" 🎙️   BOT !habla arriba y corriendo");
       console.log("-------------------------------------------");
       console.log(` 🌐  Servidor:  ${urlPublica}`);
       console.log(` 📋  Cola:      ${urlPublica}/cola`);
       console.log(` 📊  Stats:     ${urlPublica}/stats`);
-      console.log(` 🔌  WS URL:    ${urlPublica.replace("http", "ws")}`);
       console.log("-------------------------------------------\n");
     });
 
-    // 3. Ping propio (Solo en producción para evitar que Render duerma el bot)
+    // 3. Ping propio (Mantiene vivo el bot en Render Plan Gratuito)
     if (CONFIG.APP_URL) {
-      setInterval(() => {
-        https.get(CONFIG.APP_URL, (res) => {
-          log.debug(`Ping de mantenimiento: ${res.statusCode}`);
-        }).on("error", (err) => {
-          log.warn(`Ping fallido: ${err.message}`);
-        });
-      }, 4 * 60 * 1000); // Cada 4 minutos
+      setInterval(
+        () => {
+          https
+            .get(CONFIG.APP_URL, (res) => {
+              log.debug(`Ping de mantenimiento: ${res.statusCode}`);
+            })
+            .on("error", (err) => {
+              log.warn(`Ping fallido: ${err.message}`);
+            });
+        },
+        4 * 60 * 1000,
+      ); // 4 minutos
     }
 
-    // 4. Conectar a Twitch
+    // 4. Conectar a Twitch TMI
     twitch.conectar();
-
   } catch (err) {
-    log.error(`Error en inicialización: ${err.message}`);
+    log.error(`Error fatal en el arranque: ${err.message}`);
     process.exit(1);
   }
 })();
 
-// Manejo de errores no capturados
+// Captura de errores globales para que el proceso no muera
 process.on("unhandledRejection", (reason, promise) => {
-  log.error("Rechazo no manejado en:", promise, "razón:", reason);
+  log.error("Unhandled Rejection at:", promise, "reason:", reason);
 });
