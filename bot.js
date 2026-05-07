@@ -44,6 +44,15 @@ process.on("unhandledRejection", (reason) => {
 const app = express();
 const server = http.createServer(app);
 
+// ── CORS ───────────────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "https://darkops-dasboard.netlify.app");
+  res.setHeader("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 app.get("/", (req, res) => {
   res.setHeader("ngrok-skip-browser-warning", "true");
   res.sendFile(path.join(__dirname, "obs.html"));
@@ -136,9 +145,6 @@ ws.alConectar(async () => {
     const maxAttempts = 5;
 
     for (let i = 0; i < maxAttempts; i++) {
-      // probar si el puerto está libre
-      // crea un servidor temporal y escucha; si falla, probar siguiente puerto
-      // eslint-disable-next-line no-await-in-loop
       const free = await new Promise((resolve) => {
         const tester = net
           .createServer()
