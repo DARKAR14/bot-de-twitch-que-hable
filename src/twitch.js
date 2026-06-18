@@ -62,6 +62,16 @@ async function manejarMensaje(channel, tags, message, self) {
       return;
     }
   }
+  
+  // ── Filtro de ofensas ────────────────────────────────────────
+  const textoCensurado = antibot.censurar(msg);
+  if (textoCensurado !== msg) {
+    const castigo = antibot.obtenerCastigo(usuario);
+    log.warn(`Ofensa detectada: ${usuario} — castigo: ${castigo.tiempo}s`);
+    client.timeout(channel, usuario, castigo.tiempo, castigo.razon).catch(() => {});
+    client.say(channel, `@${usuario} lenguaje inapropiado, timeout de ${castigo.tiempo}s.`).catch(() => {});
+    return;
+  }
 
   // ── Comandos de moderación ────────────────────────────────────
   if (msg.toLowerCase().startsWith("!addbot ") && esMod) {

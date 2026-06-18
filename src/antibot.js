@@ -4,6 +4,30 @@
 
 const { MongoClient } = require('mongodb');
 const CONFIG = require('./config');
+const { palabrasProhibidas } = require('./prohibidas');
+
+// Historial de faltas en memoria
+const historialFaltas = new Map();
+
+// ── Censurar palabras ofensivas ────────────────────────────────
+function censurar(texto) {
+  let resultado = texto;
+  palabrasProhibidas.forEach(palabra => {
+    const regex = new RegExp(palabra, 'gi');
+    resultado = resultado.replace(regex, '***');
+  });
+  return resultado;
+}
+
+// ── Obtener siguiente castigo ──────────────────────────────────
+function obtenerCastigo(usuario) {
+  const faltas = (historialFaltas.get(usuario) || 0) + 1;
+  historialFaltas.set(usuario, faltas);
+  
+  if (faltas === 1) return { tiempo: 60, razon: "Palabra prohibida (1ª falta)" };
+  if (faltas === 2) return { tiempo: 300, razon: "Palabra prohibida (2ª falta)" };
+  return { tiempo: 86400, razon: "Palabra prohibida (Reincidente)" }; // 1 día
+}
 
 let db = null;
 let coleccionPatrones = null;
@@ -105,4 +129,4 @@ function limpiarRepeticiones(texto, maxRepeticiones = 4) {
   return texto.replace(/(.)\1{4,}/g, (match, char) => char.repeat(maxRepeticiones));
 }
 
-module.exports = { conectar, esBot, registrarBaneo, agregarPatron, limpiarRepeticiones };
+module.exports = { conectar, esBot, registrarBaneo, agregarPatron, limpiarRepeticiones, censurar, obtenerCastigo };
