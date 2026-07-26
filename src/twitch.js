@@ -18,6 +18,30 @@ const cooldowns = new Map();
 // Contador de pajas por usuario (se resetea al reiniciar el bot)
 const pajas = new Map();
 
+// ── Anti-duplicados ──────────────────────────────────────────────
+// Red de seguridad: si por cualquier motivo el mismo mensaje de chat
+// llega dos veces en una ventana muy corta (ej. dos conexiones vivas al
+// mismo canal durante un redeploy en Render), se ignora la repetición
+// en lugar de encolarla de nuevo.
+const ultimosMensajes = new Map(); // clave: "usuario|mensaje" -> timestamp
+const VENTANA_DUPLICADO_MS = 4000;
+
+function esMensajeDuplicado(usuario, mensaje) {
+  const clave = `${usuario}|${mensaje}`;
+  const ahora = Date.now();
+  const anterior = ultimosMensajes.get(clave);
+  ultimosMensajes.set(clave, ahora);
+
+  // Limpieza simple para no acumular memoria indefinidamente
+  if (ultimosMensajes.size > 500) {
+    for (const [k, t] of ultimosMensajes) {
+      if (ahora - t > VENTANA_DUPLICADO_MS) ultimosMensajes.delete(k);
+    }
+  }
+
+  return anterior !== undefined && ahora - anterior < VENTANA_DUPLICADO_MS;
+}
+
 let client = null;
 let intentoReconexion = 0;
 
@@ -31,6 +55,20 @@ function crearCliente() {
     },
     channels: [CONFIG.CANAL],
   });
+}
+
+// Cierra la conexión anterior antes de crear una nueva. Sin esto, si
+// conectar() se llama dos veces seguidas (por ejemplo un reintento que se
+// dispara antes de que el cliente viejo termine de desconectarse), podrían
+// quedar dos clientes escuchando el mismo canal a la vez, y cada mensaje
+// del chat se procesaría dos veces (duplicados en la cola).
+async function cerrarClienteAnterior() {
+  if (!client) return;
+  try {
+    await client.disconnect();
+  } catch {
+    // Ya estaba desconectado, no pasa nada
+  }
 }
 
 // Backoff exponencial: 3s → 6s → 12s → 24s → máx 60s
@@ -47,22 +85,15 @@ async function manejarMensaje(channel, tags, message, self) {
 
   const msg = message.trim();
   const usuario = tags["display-name"] || tags.username;
+
+  if (esMensajeDuplicado(usuario, msg)) {
+    log.warn(`Mensaje duplicado ignorado: ${usuario}: "${msg.slice(0, 60)}"`);
+    return;
+  }
+
   const esMod = tags.mod || tags.badges?.broadcaster;
   const esSub = tags.subscriber || esMod;
 
-  // ── Antibot ──────────────────────────────────────────────────
-  if (CONFIG.MONGODB_URI) {
-    const esSpam = await antibot.esBot(msg);
-    if (esSpam) {
-      log.warn(`Bot detectado: ${usuario} — "${msg.slice(0, 60)}"`);
-      await antibot.registrarBaneo(usuario, msg, "patrón detectado");
-      client
-        .say(channel, `/ban ${usuario} Bot de spam detectado automáticamente`)
-        .catch(() => {});
-      return;
-    }
-  }
-  
   // ── Filtro de ofensas ────────────────────────────────────────
   const textoCensurado = antibot.censurar(msg);
   if (textoCensurado !== msg) {
@@ -74,18 +105,6 @@ async function manejarMensaje(channel, tags, message, self) {
   }
 
   // ── Comandos de moderación ────────────────────────────────────
-  if (msg.toLowerCase().startsWith("!addbot ") && esMod) {
-    const patron = msg.slice(8).trim();
-    if (patron) {
-      const ok = await antibot.agregarPatron(patron);
-      if (ok)
-        client
-          .say(channel, `✅ Patrón "${patron}" agregado al antibot`)
-          .catch(() => {});
-    }
-    return;
-  }
-
   if (msg.toLowerCase() === "!cola" && esMod) {
     const stats = await mongoQueue.stats();
     const { total, usuariosUnicos, porIdioma } = stats;
@@ -230,6 +249,8 @@ async function manejarMensaje(channel, tags, message, self) {
 // ── Conexión con backoff exponencial ──────────────────────────
 
 function conectar() {
+  cerrarClienteAnterior();
+
   client = crearCliente();
   client.on("message", manejarMensaje);
 

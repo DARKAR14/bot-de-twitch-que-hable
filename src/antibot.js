@@ -1,9 +1,11 @@
 // ============================================
-//  antibot.js - Detección de bots y spam
+//  antibot.js - Filtro de lenguaje y utilidades de chat
+//  NOTA: la detección de bots de spam por patrones (esBot,
+//  registrarBaneo, agregarPatron) dependía de MongoDB y quedó
+//  descartada como decisión de arquitectura. Lo que queda aquí es
+//  100% en memoria y no necesita ninguna base de datos.
 // ============================================
 
-const { MongoClient } = require('mongodb');
-const CONFIG = require('./config');
 const { palabrasProhibidas } = require('./prohibidas');
 
 // Historial de faltas en memoria
@@ -23,104 +25,10 @@ function censurar(texto) {
 function obtenerCastigo(usuario) {
   const faltas = (historialFaltas.get(usuario) || 0) + 1;
   historialFaltas.set(usuario, faltas);
-  
+
   if (faltas === 1) return { tiempo: 60, razon: "Palabra prohibida (1ª falta)" };
   if (faltas === 2) return { tiempo: 300, razon: "Palabra prohibida (2ª falta)" };
   return { tiempo: 86400, razon: "Palabra prohibida (Reincidente)" }; // 1 día
-}
-
-let db = null;
-let coleccionPatrones = null;
-let coleccionBaneados = null;
-
-// ── Conexión a MongoDB ─────────────────────────────────────────
-async function conectar() {
-  if (!CONFIG.MONGODB_URI) {
-    console.warn('⚠️  MONGODB_URI no configurado, antibot desactivado');
-    return false;
-  }
-  try {
-    const client = new MongoClient(CONFIG.MONGODB_URI);
-    await client.connect();
-    db = client.db(CONFIG.MONGODB_DB || 'hablabot');
-    coleccionPatrones  = db.collection('patrones_bot');
-    coleccionBaneados  = db.collection('baneados');
-
-    // Índices para búsqueda rápida
-    await coleccionPatrones.createIndex({ patron: 1 });
-    await coleccionBaneados.createIndex({ usuario: 1 }, { unique: true });
-
-    // Insertar patrones por defecto si la colección está vacía
-    const total = await coleccionPatrones.countDocuments();
-    if (total === 0) await insertarPatronesIniciales();
-
-    console.log('✅ MongoDB conectado — antibot activo');
-    return true;
-  } catch (err) {
-    console.error('❌ Error conectando MongoDB:', err.message);
-    return false;
-  }
-}
-
-// Patrones comunes de bots de spam en Twitch
-async function insertarPatronesIniciales() {
-  const patrones = [
-    { patron: 'nezhna',        descripcion: 'Bot de viewers falsos' },
-    { patron: 'streamboo',     descripcion: 'Bot de viewers falsos' },
-    { patron: 'we specialize in promoting',  descripcion: 'Spam promocional' },
-    { patron: 'top viewers',   descripcion: 'Bot de viewers' },
-    { patron: 'buy viewers',   descripcion: 'Venta de viewers' },
-    { patron: 'cheap viewers', descripcion: 'Venta de viewers' },
-    { patron: 'follow4follow',  descripcion: 'Spam de follows' },
-    { patron: 'f4f',           descripcion: 'Spam de follows' },
-    { patron: 'increase your', descripcion: 'Spam promocional' },
-    { patron: 'boost your stream', descripcion: 'Spam promocional' },
-    { patron: 'get more viewers', descripcion: 'Spam promocional' },
-  ];
-  await coleccionPatrones.insertMany(patrones);
-  console.log(`📋 ${patrones.length} patrones de antibot insertados`);
-}
-
-// ── Detectar si un mensaje es de bot ──────────────────────────
-async function esBot(mensaje) {
-  if (!coleccionPatrones) return false;
-  try {
-    const msgLower = mensaje.toLowerCase();
-    const patrones = await coleccionPatrones.find({}).toArray();
-    return patrones.some((p) => msgLower.includes(p.patron.toLowerCase()));
-  } catch {
-    return false;
-  }
-}
-
-// ── Registrar usuario baneado ─────────────────────────────────
-async function registrarBaneo(usuario, mensaje, razon) {
-  if (!coleccionBaneados) return;
-  try {
-    await coleccionBaneados.updateOne(
-      { usuario },
-      { $set: { usuario, ultimoMensaje: mensaje, razon, fecha: new Date() } },
-      { upsert: true }
-    );
-    console.log(`🚫 Bot baneado registrado: ${usuario}`);
-  } catch (err) {
-    console.error('⚠️  Error registrando baneo:', err.message);
-  }
-}
-
-// ── Agregar patrón manualmente (desde chat con !addbot) ───────
-async function agregarPatron(patron, descripcion = 'Manual') {
-  if (!coleccionPatrones) return false;
-  try {
-    await coleccionPatrones.updateOne(
-      { patron: patron.toLowerCase() },
-      { $set: { patron: patron.toLowerCase(), descripcion, fecha: new Date() } },
-      { upsert: true }
-    );
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // ── Limpiar letras repetidas (AAAAAAA → AAAA) ────────────────
@@ -129,4 +37,4 @@ function limpiarRepeticiones(texto, maxRepeticiones = 4) {
   return texto.replace(/(.)\1{4,}/g, (match, char) => char.repeat(maxRepeticiones));
 }
 
-module.exports = { conectar, esBot, registrarBaneo, agregarPatron, limpiarRepeticiones, censurar, obtenerCastigo };
+module.exports = { limpiarRepeticiones, censurar, obtenerCastigo };

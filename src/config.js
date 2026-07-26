@@ -13,8 +13,6 @@ const CONFIG = {
   BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot", // Cuenta Twitch del bot
   BOT_TOKEN: process.env.BOT_TOKEN || "", // twitchapps.com/tmi
   CANAL: process.env.CANAL || "", // Sin el #
-  MONGODB_URI: process.env.MONGODB_URI || "",
-  MONGODB_DB: process.env.MONGODB_DB || "hablabot",
 
   // --- Servidor ---
   // Ajuste para Render: PORT es la variable que ellos inyectan
@@ -40,10 +38,6 @@ const CONFIG = {
   MAX_CARACTERES: parseInt(process.env.MAX_CARACTERES) || 150,
   MAX_COLA: parseInt(process.env.MAX_COLA) || 20,
 
-  // --- MongoDB (antibot) ---
-  MONGODB_URI: process.env.MONGODB_URI || "",
-  MONGODB_DB: process.env.MONGODB_DB || "hablabot",
-
   // --- TTS ---
   TTS_RATE: parseFloat(process.env.TTS_RATE) || 1.05,
   TTS_PITCH: parseFloat(process.env.TTS_PITCH) || 1,
@@ -63,8 +57,6 @@ function validate() {
     process.exit(1);
   }
 
-  if (!CONFIG.MONGODB_URI)
-    log.warn("MONGODB_URI no configurado — antibot desactivado");
   if (!CONFIG.APP_URL)
     log.warn("APP_URL no configurado — ping propio desactivado");
   

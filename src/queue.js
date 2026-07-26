@@ -20,7 +20,20 @@ const MAX_EDAD_MS = 30 * 60 * 1000;
 function inicializar() {
   const dir = path.dirname(QUEUE_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(QUEUE_FILE)) guardar([]);
+
+  // Siempre se arranca con la cola vacía, incluso si ya existía un
+  // queue.json de una sesión anterior. Antes solo se creaba el archivo
+  // si no existía, así que un crash a mitad de proceso dejaba mensajes
+  // viejos (o duplicados) esperando en disco y el bot los volvía a
+  // procesar al reiniciar. Un reinicio del bot es un buen punto para
+  // empezar la cola desde cero.
+  if (fs.existsSync(QUEUE_FILE)) {
+    const previo = leer();
+    if (previo.length > 0) {
+      log.warn(`Descartando ${previo.length} mensaje(s) pendiente(s) de la sesión anterior`);
+    }
+  }
+  guardar([]);
 }
 
 function leer() {
