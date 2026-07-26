@@ -33,7 +33,6 @@ function obtenerCastigo(usuario) {
 
 // ── Limpiar letras repetidas (AAAAAAA → AAAA) ────────────────
 function limpiarRepeticiones(texto, maxRepeticiones = 4) {
-  // Reemplaza cualquier carácter repetido más de N veces
   return texto.replace(/(.)\1{4,}/g, (match, char) => char.repeat(maxRepeticiones));
 }
 
