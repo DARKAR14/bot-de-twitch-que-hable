@@ -13,6 +13,14 @@ const cors = require("cors"); // Agregado para el panel
 const { createLogger } = require("./src/logger");
 const log = createLogger("BOT");
 
+// ── ID único de esta instancia ─────────────────────────────────
+// Si alguna vez vuelve a aparecer el bug de mensajes duplicados, revisa
+// los logs de Render: si ves dos INSTANCE_ID distintos activos al mismo
+// tiempo, significa que hay dos procesos del bot corriendo a la vez
+// (deploy solapado) y cada uno está procesando el chat por separado.
+const INSTANCE_ID = `${process.pid}-${Date.now()}`;
+log.info(`Arrancando instancia: ${INSTANCE_ID}`);
+
 // ── Crear carpetas necesarias ──────────────────────────────────
 const dirs = [path.join(__dirname, "data"), path.join(__dirname, "data/audio")];
 dirs.forEach((dir) => {
@@ -30,7 +38,6 @@ const mongoQueue = require("./src/mongoQueue");
 const ws = require("./src/websocket");
 const twitch = require("./src/twitch");
 const tts = require("./src/tts");
-const antibot = require("./src/antibot");
 
 // ── Captura errores globales ───────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -173,7 +180,6 @@ ws.alConectar(async () => {
 (async () => {
   try {
     await mongoQueue.conectar();
-    antibot.conectar();
 
     const pendientes = await mongoQueue.total();
     if (pendientes > 0) {
