@@ -1,280 +1,234 @@
 // ============================================
-//  twitch.js - Conexión y lógica del bot.
+//  twitch.js - Conexion y comandos del bot
 // ============================================
 
 const tmi = require("tmi.js");
 const CONFIG = require("./config");
-const mongoQueue = require("./mongoQueue");
-const ws = require("./websocket");
+const queue = require("./queue");
+const playback = require("./playback");
 const tts = require("./tts");
-const antibot = require("./antibot");
 const { createLogger } = require("./logger");
 
 const log = createLogger("TWITCH");
-
-// Cooldown compartido entre todos los comandos TTS por usuario
 const cooldowns = new Map();
-
-// Contador de pajas por usuario (se resetea al reiniciar el bot)
+const idsProcesados = new Map();
 const pajas = new Map();
 
-// ── Anti-duplicados ──────────────────────────────────────────────
-// Red de seguridad: si por cualquier motivo el mismo mensaje de chat
-// llega dos veces en una ventana muy corta (ej. dos conexiones vivas al
-// mismo canal durante un redeploy en Render), se ignora la repetición
-// en lugar de encolarla de nuevo.
-const ultimosMensajes = new Map(); // clave: "usuario|mensaje" -> timestamp
-const VENTANA_DUPLICADO_MS = 4000;
-
-function esMensajeDuplicado(usuario, mensaje) {
-  const clave = `${usuario}|${mensaje}`;
-  const ahora = Date.now();
-  const anterior = ultimosMensajes.get(clave);
-  ultimosMensajes.set(clave, ahora);
-
-  // Limpieza simple para no acumular memoria indefinidamente
-  if (ultimosMensajes.size > 500) {
-    for (const [k, t] of ultimosMensajes) {
-      if (ahora - t > VENTANA_DUPLICADO_MS) ultimosMensajes.delete(k);
-    }
-  }
-
-  return anterior !== undefined && ahora - anterior < VENTANA_DUPLICADO_MS;
-}
-
 let client = null;
+let conectando = false;
+let deteniendo = false;
+let reconnectTimer = null;
 let intentoReconexion = 0;
+
+const comandosTts = [
+  { prefijo: CONFIG.PREFIJO_COMANDO, idioma: "es", flag: "🇪🇸" },
+  { prefijo: CONFIG.PREFIJO_COMANDO_EN, idioma: "en", flag: "🇺🇸" },
+  { prefijo: CONFIG.PREFIJO_COMANDO_JP, idioma: "ja", flag: "🇯🇵" },
+  { prefijo: CONFIG.PREFIJO_COMANDO_RU, idioma: "ru", flag: "🇷🇺" },
+  { prefijo: CONFIG.PREFIJO_COMANDO_PT, idioma: "pt", flag: "🇧🇷" },
+];
 
 function crearCliente() {
   return new tmi.Client({
     options: { debug: false },
     connection: { reconnect: false, secure: true },
-    identity: {
-      username: CONFIG.BOT_USERNAME,
-      password: CONFIG.BOT_TOKEN,
-    },
+    identity: { username: CONFIG.BOT_USERNAME, password: CONFIG.BOT_TOKEN },
     channels: [CONFIG.CANAL],
   });
 }
 
-// Cierra la conexión anterior antes de crear una nueva. Sin esto, si
-// conectar() se llama dos veces seguidas (por ejemplo un reintento que se
-// dispara antes de que el cliente viejo termine de desconectarse), podrían
-// quedar dos clientes escuchando el mismo canal a la vez, y cada mensaje
-// del chat se procesaría dos veces (duplicados en la cola).
-async function cerrarClienteAnterior() {
-  if (!client) return;
-  try {
-    await client.disconnect();
-  } catch {
-    // Ya estaba desconectado, no pasa nada
+function mensajeYaProcesado(tags) {
+  const id = tags.id;
+  if (!id) return false;
+  const ahora = Date.now();
+  if (idsProcesados.has(id)) return true;
+  idsProcesados.set(id, ahora);
+  if (idsProcesados.size > 1000) {
+    for (const [key, timestamp] of idsProcesados) {
+      if (ahora - timestamp > 5 * 60 * 1000) idsProcesados.delete(key);
+    }
   }
+  return false;
 }
 
-// Backoff exponencial: 3s → 6s → 12s → 24s → máx 60s
-function calcularDelayReconexion() {
-  const delay = Math.min(3000 * Math.pow(2, intentoReconexion), 60000);
-  intentoReconexion++;
-  return delay;
+function limpiarRepeticiones(texto, maximo = 4) {
+  const minimoExtra = Math.max(1, maximo);
+  const patron = new RegExp(`(.)\\1{${minimoExtra},}`, "gu");
+  return texto.replace(patron, (_, caracter) => caracter.repeat(maximo));
 }
 
-// ── Manejador de mensajes ──────────────────────────────────────
+function detectarComando(mensaje) {
+  const lower = mensaje.toLowerCase();
+  return comandosTts.find(
+    ({ prefijo }) => lower === prefijo || lower.startsWith(`${prefijo} `),
+  );
+}
+
+function decir(channel, mensaje) {
+  return client?.say(channel, mensaje).catch((err) => {
+    log.warn("No se pudo responder en Twitch", err.message);
+  });
+}
 
 async function manejarMensaje(channel, tags, message, self) {
-  if (self) return;
+  if (self || mensajeYaProcesado(tags)) return;
 
   const msg = message.trim();
-  const usuario = tags["display-name"] || tags.username;
+  const usuario = tags["display-name"] || tags.username || "usuario";
+  const claveUsuario = (tags.username || usuario).toLowerCase();
+  const esMod = Boolean(tags.mod || tags.badges?.broadcaster);
+  const esSub = Boolean(tags.subscriber || esMod);
 
-  if (esMensajeDuplicado(usuario, msg)) {
-    log.warn(`Mensaje duplicado ignorado: ${usuario}: "${msg.slice(0, 60)}"`);
-    return;
-  }
-
-  const esMod = tags.mod || tags.badges?.broadcaster;
-  const esSub = tags.subscriber || esMod;
-
-  // ── Filtro de ofensas ────────────────────────────────────────
-  const textoCensurado = antibot.censurar(msg);
-  if (textoCensurado !== msg) {
-    const castigo = antibot.obtenerCastigo(usuario);
-    log.warn(`Ofensa detectada: ${usuario} — castigo: ${castigo.tiempo}s`);
-    client.timeout(channel, usuario, castigo.tiempo, castigo.razon).catch(() => {});
-    client.say(channel, `@${usuario} lenguaje inapropiado, timeout de ${castigo.tiempo}s.`).catch(() => {});
-    return;
-  }
-
-  // ── Comandos de moderación ────────────────────────────────────
   if (msg.toLowerCase() === "!cola" && esMod) {
-    const stats = await mongoQueue.stats();
-    const { total, usuariosUnicos, porIdioma } = stats;
+    const stats = queue.stats();
     const resumen =
-      total === 0
-        ? "📭 La cola está vacía"
-        : `📋 Cola: ${total} msg | ${usuariosUnicos} usuarios | 🇪🇸${porIdioma.es || 0} 🇺🇸${porIdioma.en || 0} 🇯🇵${porIdioma.ja || 0} 🇷🇺${porIdioma.ru || 0} 🇧🇷${porIdioma.pt || 0}`;
-    client.say(channel, resumen).catch(() => {});
+      stats.total === 0
+        ? "📭 La cola esta vacia"
+        : `📋 Cola: ${stats.total} | listos: ${stats.listo} | generando: ${stats.generando}`;
+    await decir(channel, resumen);
     return;
   }
 
   if (msg.toLowerCase() === "!limpiar" && esMod) {
-    await mongoQueue.limpiar();
-    client.say(channel, "🧹 Cola limpiada").catch(() => {});
+    const eliminados = playback.limpiar();
+    await decir(channel, `🧹 Cola limpiada (${eliminados} mensajes)`);
     return;
   }
 
-  // ── !paja — número aleatorio de pajas entre 0 y 99 ───────────
   if (msg.toLowerCase() === "!paja") {
-    const cantidad = Math.floor(Math.random() * 100); // 0 a 99
-    const anterior = pajas.get(usuario) || 0;
-    pajas.set(usuario, cantidad);
-
-    let texto;
-    if (cantidad === 0) {
-      texto = `@${usuario} hoy está en modo monje, 0 pajas 🧘`;
-    } else if (cantidad === 99) {
-      texto = `@${usuario} se hizo 99 pajas hoy... busca ayuda 💀`;
-    } else if (cantidad > anterior) {
-      texto = `@${usuario} se hizo ${cantidad} pajas hoy 🥴`;
-    } else {
-      texto = `@${usuario} se hizo ${cantidad} pajas hoy, menos que antes 😐`;
-    }
-
-    client.say(channel, texto).catch(() => {});
-    log.info(`!paja | ${usuario}: ${cantidad}`);
+    const cantidad = Math.floor(Math.random() * 100);
+    const anterior = pajas.get(claveUsuario) || 0;
+    pajas.set(claveUsuario, cantidad);
+    const respuesta =
+      cantidad === 0
+        ? `@${usuario} hoy esta en modo monje, 0 pajas 🧘`
+        : cantidad === 99
+          ? `@${usuario} se hizo 99 pajas hoy... busca ayuda 💀`
+          : cantidad > anterior
+            ? `@${usuario} se hizo ${cantidad} pajas hoy 🥴`
+            : `@${usuario} se hizo ${cantidad} pajas hoy, menos que antes 😐`;
+    await decir(channel, respuesta);
     return;
   }
 
-  // ── Detectar comando TTS ──────────────────────────────────────
-  const msgLower = msg.toLowerCase();
-  const esES = msgLower.startsWith(CONFIG.PREFIJO_COMANDO);
-  const esEN = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_EN);
-  const esJP = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_JP);
-  const esRU = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_RU);
-  const esPT = msgLower.startsWith(CONFIG.PREFIJO_COMANDO_PT);
+  const comando = detectarComando(msg);
+  if (!comando) return;
 
-  if (!esES && !esEN && !esJP && !esRU && !esPT) return;
-
-  const idioma = esEN ? "en" : esJP ? "ja" : esRU ? "ru" : esPT ? "pt" : "es";
-
-  const prefijo = esEN
-    ? CONFIG.PREFIJO_COMANDO_EN
-    : esJP
-      ? CONFIG.PREFIJO_COMANDO_JP
-      : esRU
-        ? CONFIG.PREFIJO_COMANDO_RU
-        : esPT
-          ? CONFIG.PREFIJO_COMANDO_PT
-          : CONFIG.PREFIJO_COMANDO;
-
-  const flags = { es: "🇪🇸", en: "🇺🇸", ja: "🇯🇵", ru: "🇷🇺", pt: "🇧🇷" };
-
-  // Permiso de sub
   if (CONFIG.SOLO_SUBS && !esSub) {
-    client
-      .say(
-        channel,
-        `@${usuario} ¡Solo los suscriptores pueden usar ${prefijo}!`,
-      )
-      .catch(() => {});
+    await decir(channel, `@${usuario} solo los suscriptores pueden usar ${comando.prefijo}.`);
     return;
   }
 
-  // Cooldown compartido entre TODOS los comandos TTS
+  let texto = msg.slice(comando.prefijo.length).trim();
+  if (!texto) {
+    await decir(channel, `@${usuario} escribe algo despues de ${comando.prefijo}.`);
+    return;
+  }
+
+  texto = limpiarRepeticiones(texto, 4).slice(0, CONFIG.MAX_CARACTERES);
+
   if (!esMod) {
     const ahora = Date.now();
-    const ultimoUso = cooldowns.get(usuario) || 0;
+    const ultimoUso = cooldowns.get(claveUsuario) || 0;
     const restante = Math.ceil(
       (CONFIG.COOLDOWN_SEGUNDOS * 1000 - (ahora - ultimoUso)) / 1000,
     );
     if (restante > 0) {
-      client
-        .say(
-          channel,
-          `@${usuario} espera ${restante}s para usar el comando de nuevo.`,
-        )
-        .catch(() => {});
+      await decir(channel, `@${usuario} espera ${restante}s para usar el TTS de nuevo.`);
       return;
     }
-    cooldowns.set(usuario, ahora);
   }
 
-  // Extraer y limpiar texto
-  let texto = msg.slice(prefijo.length).trim();
-
-  if (!texto) {
-    client
-      .say(channel, `@${usuario} escribe algo después de ${prefijo} 😅`)
-      .catch(() => {});
+  if (queue.total() >= CONFIG.MAX_COLA) {
+    await decir(channel, `@${usuario} la cola esta llena. Espera un momento.`);
     return;
   }
 
-  texto = antibot.limpiarRepeticiones(texto, 4);
-  if (texto.length > CONFIG.MAX_CARACTERES)
-    texto = texto.slice(0, CONFIG.MAX_CARACTERES);
-
-  const totalEnCola = await mongoQueue.total();
-  if (totalEnCola >= CONFIG.MAX_COLA) {
-    client
-      .say(channel, `@${usuario} la cola está llena. Espera un momento.`)
-      .catch(() => {});
-    return;
-  }
-
-  const esPrimero = totalEnCola === 0;
-  const entrada = await mongoQueue.agregarMensaje({
-    usuario,
-    mensaje: texto,
-    idioma,
-  });
-
-  log.info(`${flags[idioma]} ${prefijo} | ${usuario}: "${texto}"`);
+  const entrada = queue.agregar({ usuario, mensaje: texto, idioma: comando.idioma });
+  if (!esMod) cooldowns.set(claveUsuario, Date.now());
+  playback.notificarCambio();
+  log.info(`${comando.flag} ${comando.prefijo} | ${usuario}: "${texto}"`);
 
   tts
-    .generarAudio(texto, idioma)
-    .then(async (rutaAudio) => {
-      const audioBase64 = tts.audioABase64(rutaAudio);
-      await mongoQueue.actualizarAudio(entrada.id, rutaAudio, audioBase64);
-      if (esPrimero) {
-        await mongoQueue.marcarComoeproduciendo(entrada.id);
-        ws.enviar({ tipo: "nuevo", ...entrada, audioBase64 });
+    .generarAudio(texto, comando.idioma, {
+      id: entrada.id,
+      debeContinuar: () => Boolean(queue.buscar(entrada.id)),
+    })
+    .then((resultado) => {
+      if (!queue.actualizarAudio(entrada.id, resultado)) {
+        tts.eliminarAudio(resultado.rutaAudio);
+        return;
       }
+      playback.notificarCambio();
     })
     .catch((err) => {
-      log.error(`Error generando TTS para ${usuario}`, err.message);
-      if (esPrimero)
-        ws.enviar({ tipo: "nuevo", ...entrada, audioBase64: null });
+      if (err.code === "TTS_CANCELLED") return;
+      log.error(`Todos los proveedores TTS fallaron para ${usuario}`, err.message);
+      if (queue.marcarFallback(entrada.id, err.message)) playback.notificarCambio();
     });
 }
 
-// ── Conexión con backoff exponencial ──────────────────────────
-
-function conectar() {
-  cerrarClienteAnterior();
-
-  client = crearCliente();
-  client.on("message", manejarMensaje);
-
-  client.on("connected", (addr, port) => {
-    intentoReconexion = 0;
-    log.info(`Bot conectado a Twitch — ${addr}:${port}`);
-    log.info(`Canal: #${CONFIG.CANAL}`);
-  });
-
-  client.on("disconnected", (reason) => {
-    const delay = calcularDelayReconexion();
-    log.warn(
-      `Bot desconectado: ${reason}. Reintentando en ${delay / 1000}s...`,
-    );
-    setTimeout(conectar, delay);
-  });
-
-  client.connect().catch((err) => {
-    const delay = calcularDelayReconexion();
-    log.error(
-      `Error conectando: ${err.message}. Reintentando en ${delay / 1000}s...`,
-    );
-    setTimeout(conectar, delay);
-  });
+function programarReconexion(razon) {
+  if (deteniendo || reconnectTimer) return;
+  const delay = Math.min(3000 * 2 ** intentoReconexion, 60_000);
+  intentoReconexion += 1;
+  log.warn(`${razon}. Reintentando Twitch en ${delay / 1000}s`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    conectar();
+  }, delay);
+  reconnectTimer.unref?.();
 }
 
-module.exports = { conectar };
+async function conectar() {
+  if (deteniendo || conectando) return;
+  conectando = true;
+
+  if (client) {
+    const anterior = client;
+    client = null;
+    anterior.removeAllListeners();
+    try {
+      await anterior.disconnect();
+    } catch {}
+  }
+
+  const nuevo = crearCliente();
+  client = nuevo;
+  nuevo.on("message", manejarMensaje);
+  nuevo.on("connected", (addr, port) => {
+    intentoReconexion = 0;
+    log.info(`Bot conectado a Twitch ${addr}:${port} | #${CONFIG.CANAL}`);
+  });
+  nuevo.on("disconnected", (reason) => {
+    if (client === nuevo) programarReconexion(`Twitch desconectado: ${reason}`);
+  });
+
+  try {
+    await nuevo.connect();
+  } catch (err) {
+    if (client === nuevo) programarReconexion(`Error conectando Twitch: ${err.message}`);
+  } finally {
+    conectando = false;
+  }
+}
+
+async function desconectar() {
+  deteniendo = true;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  const actual = client;
+  client = null;
+  if (actual) {
+    actual.removeAllListeners();
+    try {
+      await actual.disconnect();
+    } catch {}
+  }
+}
+
+module.exports = {
+  conectar,
+  desconectar,
+  _internals: { detectarComando, limpiarRepeticiones, mensajeYaProcesado },
+};

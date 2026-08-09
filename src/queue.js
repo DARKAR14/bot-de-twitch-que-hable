@@ -1,167 +1,170 @@
 // ============================================
-//  queue.js - Cola de peticiones TTS
-//  Mejoras: escritura atómica, límite de edad,
-//           método stats(), logger centralizado
+//  queue.js - Cola local rapida y persistencia atomica
 // ============================================
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { createLogger } = require("./logger");
 
 const log = createLogger("QUEUE");
-const QUEUE_FILE = path.join(__dirname, "../data/queue.json");
-const TEMP_FILE = QUEUE_FILE + ".tmp";
+const DEFAULT_QUEUE_FILE = path.join(__dirname, "../data/queue.json");
 
-// Mensajes con más de 30 minutos se descartan automáticamente
-const MAX_EDAD_MS = 30 * 60 * 1000;
+function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
+  const tempFile = `${queueFile}.tmp`;
+  let items = [];
+  let inicializada = false;
 
-// ── Persistencia ───────────────────────────────────────────────
+  function persistir() {
+    const dir = path.dirname(queueFile);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(tempFile, JSON.stringify(items, null, 2), "utf8");
+    fs.renameSync(tempFile, queueFile);
+  }
 
-function inicializar() {
-  const dir = path.dirname(QUEUE_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  function inicializar({ limpiarAlArrancar = true } = {}) {
+    fs.mkdirSync(path.dirname(queueFile), { recursive: true });
 
-  // Siempre se arranca con la cola vacía, incluso si ya existía un
-  // queue.json de una sesión anterior. Antes solo se creaba el archivo
-  // si no existía, así que un crash a mitad de proceso dejaba mensajes
-  // viejos (o duplicados) esperando en disco y el bot los volvía a
-  // procesar al reiniciar. Un reinicio del bot es un buen punto para
-  // empezar la cola desde cero.
-  if (fs.existsSync(QUEUE_FILE)) {
-    const previo = leer();
-    if (previo.length > 0) {
-      log.warn(`Descartando ${previo.length} mensaje(s) pendiente(s) de la sesión anterior`);
+    if (!limpiarAlArrancar && fs.existsSync(queueFile)) {
+      try {
+        const contenido = JSON.parse(fs.readFileSync(queueFile, "utf8"));
+        items = Array.isArray(contenido) ? contenido : [];
+      } catch (err) {
+        logger.warn("queue.json no era valido; se inicia una cola vacia", err.message);
+        items = [];
+      }
+    } else {
+      if (fs.existsSync(queueFile)) {
+        try {
+          const anterior = JSON.parse(fs.readFileSync(queueFile, "utf8"));
+          if (Array.isArray(anterior) && anterior.length > 0) {
+            logger.warn(
+              `Descartando ${anterior.length} mensaje(s) de una sesion anterior`,
+            );
+          }
+        } catch {}
+      }
+      items = [];
     }
-  }
-  guardar([]);
-}
 
-function leer() {
-  try {
-    const raw = fs.readFileSync(QUEUE_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    log.warn("Error leyendo queue.json, reseteando...");
-    guardar([]);
-    return [];
+    persistir();
+    inicializada = true;
   }
-}
 
-// Escritura atómica: escribe en .tmp y luego renombra
-// Así si el proceso muere a mitad de escritura, el archivo original queda intacto
-function guardar(data) {
-  try {
-    fs.writeFileSync(TEMP_FILE, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(TEMP_FILE, QUEUE_FILE);
-  } catch (err) {
-    log.error("Error guardando queue.json", err.message);
+  function asegurarInicializada() {
+    if (!inicializada) inicializar();
   }
-}
 
-// ── Limpieza por edad ──────────────────────────────────────────
-// Descarta mensajes que llevan más de MAX_EDAD_MS esperando
-// (por ejemplo, si OBS estuvo desconectado mucho tiempo)
-function limpiarViejos() {
-  const queue = leer();
-  const ahora = Date.now();
-  const validos = queue.filter((e) => {
-    const edad = ahora - new Date(e.timestamp).getTime();
-    if (edad > MAX_EDAD_MS) {
-      log.warn(
-        `Mensaje descartado por antigüedad (${Math.round(edad / 60000)} min): ${e.usuario}`,
-      );
-      return false;
-    }
+  function agregar(entrada) {
+    asegurarInicializada();
+    const nueva = {
+      id: crypto.randomUUID(),
+      usuario: entrada.usuario,
+      mensaje: entrada.mensaje,
+      idioma: entrada.idioma || "es",
+      estado: "generando",
+      timestamp: new Date().toISOString(),
+    };
+    items.push(nueva);
+    persistir();
+    logger.info(`+1 en cola (total: ${items.length}) | ${nueva.usuario}`);
+    return { ...nueva };
+  }
+
+  function actualizarAudio(id, audio) {
+    asegurarInicializada();
+    const entrada = items.find((item) => item.id === id);
+    if (!entrada) return false;
+    entrada.rutaAudio = audio.rutaAudio;
+    entrada.audioMime = audio.mimeType || "audio/mpeg";
+    entrada.proveedorTts = audio.provider || "google";
+    entrada.estado = "listo";
+    delete entrada.errorTts;
+    persistir();
     return true;
-  });
-
-  if (validos.length !== queue.length) {
-    guardar(validos);
-    log.info(
-      `Limpieza por edad: ${queue.length - validos.length} mensajes descartados`,
-    );
   }
 
-  return validos;
-}
-
-// ── Operaciones ────────────────────────────────────────────────
-
-function agregar(entrada) {
-  const queue = leer();
-  const nueva = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    usuario: entrada.usuario,
-    mensaje: entrada.mensaje,
-    idioma: entrada.idioma || "es",
-    timestamp: new Date().toISOString(),
-  };
-  queue.push(nueva);
-  guardar(queue);
-  log.info(
-    `+1 en cola (total: ${queue.length}) | ${nueva.usuario}: "${nueva.mensaje}"`,
-  );
-  return nueva;
-}
-
-function actualizarAudio(id, rutaAudio) {
-  const queue = leer();
-  const entry = queue.find((e) => e.id === id);
-  if (entry) {
-    entry.rutaAudio = rutaAudio;
-    guardar(queue);
+  function marcarFallback(id, error) {
+    asegurarInicializada();
+    const entrada = items.find((item) => item.id === id);
+    if (!entrada) return false;
+    entrada.estado = "listo";
+    entrada.fallbackNavegador = true;
+    entrada.errorTts = String(error || "TTS no disponible").slice(0, 200);
+    persistir();
+    return true;
   }
-}
 
-function eliminar(id) {
-  const queue = leer();
-  const nueva = queue.filter((e) => e.id !== id);
-  guardar(nueva);
-  log.info(`-1 de cola (total: ${nueva.length}) | ID: ${id}`);
-}
+  function buscar(id) {
+    asegurarInicializada();
+    const entrada = items.find((item) => item.id === id);
+    return entrada ? { ...entrada } : null;
+  }
 
-function obtenerPrimero() {
-  const queue = limpiarViejos(); // Aprovecha cada consulta para limpiar viejos
-  return queue[0] || null;
-}
+  function obtenerPrimero() {
+    asegurarInicializada();
+    return items[0] ? { ...items[0] } : null;
+  }
 
-function total() {
-  return leer().length;
-}
+  function eliminar(id) {
+    asegurarInicializada();
+    const indice = items.findIndex((item) => item.id === id);
+    if (indice === -1) return null;
+    const [eliminada] = items.splice(indice, 1);
+    persistir();
+    logger.info(`-1 de cola (total: ${items.length}) | ID: ${id}`);
+    return { ...eliminada };
+  }
 
-function limpiar() {
-  guardar([]);
-  log.info("Cola limpiada completamente");
-}
+  function limpiar() {
+    asegurarInicializada();
+    const eliminadas = items.map((item) => ({ ...item }));
+    items = [];
+    persistir();
+    logger.info("Cola limpiada completamente");
+    return eliminadas;
+  }
 
-// ── Estadísticas ───────────────────────────────────────────────
-// Útil para el dashboard o para el comando !stats en chat
-function stats() {
-  const queue = leer();
+  function leer() {
+    asegurarInicializada();
+    return items.map((item) => ({ ...item }));
+  }
 
-  const usuariosUnicos = new Set(queue.map((e) => e.usuario)).size;
+  function total() {
+    asegurarInicializada();
+    return items.length;
+  }
 
-  const porIdioma = queue.reduce((acc, e) => {
-    acc[e.idioma || "es"] = (acc[e.idioma || "es"] || 0) + 1;
-    return acc;
-  }, {});
+  function stats() {
+    asegurarInicializada();
+    const porIdioma = items.reduce((acc, item) => {
+      acc[item.idioma] = (acc[item.idioma] || 0) + 1;
+      return acc;
+    }, {});
+    return {
+      total: items.length,
+      usuariosUnicos: new Set(items.map((item) => item.usuario)).size,
+      porIdioma,
+      generando: items.filter((item) => item.estado === "generando").length,
+      listo: items.filter((item) => item.estado === "listo").length,
+      masAntiguo: items[0]?.timestamp || null,
+    };
+  }
 
   return {
-    total: queue.length,
-    usuariosUnicos,
-    porIdioma,
-    masAntiguo: queue[0]?.timestamp || null,
+    inicializar,
+    agregar,
+    actualizarAudio,
+    marcarFallback,
+    buscar,
+    obtenerPrimero,
+    eliminar,
+    limpiar,
+    leer,
+    total,
+    stats,
   };
 }
 
-module.exports = {
-  inicializar,
-  agregar,
-  eliminar,
-  actualizarAudio,
-  obtenerPrimero,
-  total,
-  limpiar,
-  leer,
-  stats,
-};
+const cola = crearCola();
+module.exports = { ...cola, crearCola };

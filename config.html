@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Configuración TTS Bot</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #0a0a14;
+      color: #f9f9f9;
+      font-family: Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .panel-control {
+      background: rgba(15, 15, 25, 0.92);
+      border: 2px solid #ea8352;
+      border-radius: 12px;
+      padding: 20px;
+      width: 100%;
+      max-width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .panel-control h3 {
+      font-size: 18px;
+      margin-bottom: 6px;
+      text-align: center;
+    }
+
+    .panel-control label {
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+      align-items: center;
+      width: 100%;
+    }
+
+    .panel-control input[type="text"],
+    .panel-control input[type="number"] {
+      width: 120px;
+      background: #1e1e2a;
+      color: #fff;
+      border: 1px solid #444;
+      padding: 4px 8px;
+      border-radius: 4px;
+    }
+
+    .panel-control button {
+      padding: 8px 12px;
+      border: 1px solid #ea8352;
+      border-radius: 6px;
+      background: #eb8352;
+      color: #111;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .config-status {
+      font-size: 14px;
+      min-height: 20px;
+      color: #8f8;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="panel-control" class="panel-control">
+    <h3>Control Diseño y Voz</h3>
+    <label>Color texto usuario: <input id="inputTextColor" type="color" value="#eb8352" /></label>
+    <label>Color texto mensaje: <input id="inputMessageColor" type="color" value="#f0f0f0" /></label>
+    <label>Fondo notificación: <input id="inputBackground" type="color" value="#0a0a14" /></label>
+    <label>Borde: <input id="inputBorderColor" type="color" value="#ea8352" /></label>
+    <label>Barra progreso: <input id="inputBarGradient" type="text" value="linear-gradient(90deg, #eb8352, #ea8352)" /></label>
+    <label>Velocidad voz / rate: <input id="inputVoiceRate" type="number" min="0.5" max="2" step="0.05" value="1.05" /></label>
+    <label>Tono voz / pitch: <input id="inputVoicePitch" type="number" min="0" max="2" step="0.05" value="1" /></label>
+    <button id="btnSaveConfig">Guardar config</button>
+    <div id="configStatus" class="config-status"></div>
+  </div>
+
+  <script>
+    const panel = {
+      textColor: document.getElementById('inputTextColor'),
+      messageColor: document.getElementById('inputMessageColor'),
+      background: document.getElementById('inputBackground'),
+      borderColor: document.getElementById('inputBorderColor'),
+      barGradient: document.getElementById('inputBarGradient'),
+      voiceRate: document.getElementById('inputVoiceRate'),
+      voicePitch: document.getElementById('inputVoicePitch'),
+      save: document.getElementById('btnSaveConfig'),
+      status: document.getElementById('configStatus'),
+    };
+
+    let uiConfig = {
+      textColor: '#eb8352',
+      messageColor: '#f0f0f0',
+      background: 'rgba(10, 10, 20, 0.92)',
+      borderColor: '#ea8352',
+      barGradient: 'linear-gradient(90deg, #eb8352, #ea8352)',
+      voiceLang: 'es-ES',
+      voiceRate: 1.05,
+      voicePitch: 1,
+    };
+
+    async function cargarConfig() {
+      try {
+        const resp = await fetch('/api/config');
+        if (!resp.ok) throw new Error(`Status ${resp.status}`);
+        const data = await resp.json();
+        uiConfig = { ...uiConfig, ...data };
+        panel.textColor.value = uiConfig.textColor;
+        panel.messageColor.value = uiConfig.messageColor;
+        panel.background.value = uiConfig.background.startsWith('#') ? uiConfig.background : '#0a0a14';
+        panel.borderColor.value = uiConfig.borderColor;
+        panel.barGradient.value = uiConfig.barGradient;
+        panel.voiceRate.value = uiConfig.voiceRate;
+        panel.voicePitch.value = uiConfig.voicePitch;
+        panel.status.textContent = 'Configuración cargada';
+      } catch (err) {
+        console.warn('No se pudo cargar config:', err);
+        panel.status.textContent = 'No se pudo cargar config (usar valores por defecto)';
+      }
+    }
+
+    async function guardarConfig() {
+      const payload = {
+        textColor: panel.textColor.value,
+        messageColor: panel.messageColor.value,
+        background: panel.background.value,
+        borderColor: panel.borderColor.value,
+        barGradient: panel.barGradient.value,
+        voiceRate: Number(panel.voiceRate.value),
+        voicePitch: Number(panel.voicePitch.value),
+      };
+      try {
+        const resp = await fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error(`Status ${resp.status}`);
+        const data = await resp.json();
+        uiConfig = { ...uiConfig, ...data.config };
+        panel.status.textContent = 'Configuración guardada';
+      } catch (err) {
+        console.error('Error guardando config:', err);
+        panel.status.textContent = 'Error guardando config';
+      }
+    }
+
+    panel.save.addEventListener('click', guardarConfig);
+    cargarConfig();
+  </script>
+</body>
+
+</html>

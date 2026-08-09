@@ -1,0 +1,177 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "TTS Bot API",
+    "version": "1.0.0",
+    "description": "API para ver cola, limpiar cola y cambiar diseño/voz en tiempo real desde frontend."
+  },
+  "servers": [{ "url": "http://localhost:3000", "description": "Servidor local" }],
+  "paths": {
+    "/api/cola": {
+      "get": {
+        "summary": "Obtener cola de mensajes",
+        "description": "Devuelve estado actual de la cola",
+        "responses": {
+          "200": {
+            "description": "Cola actual",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer", "example": 2 },
+                    "mensajes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "example": "abc123" },
+                          "usuario": { "type": "string", "example": "juan" },
+                          "mensaje": { "type": "string", "example": "hola" },
+                          "rutaAudio": { "type": "string", "nullable": true }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cola": {
+      "get": {
+        "summary": "Obtener cola (alias)",
+        "description": "Acceso legacy a cola",
+        "responses": {
+          "200": {
+            "description": "Cola actual",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer", "example": 2 },
+                    "mensajes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string", "example": "abc123" },
+                          "usuario": { "type": "string", "example": "juan" },
+                          "mensaje": { "type": "string", "example": "hola" },
+                          "rutaAudio": { "type": "string", "nullable": true }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Limpiar cola",
+        "description": "Vacía la cola y elimina entradas",
+        "responses": {
+          "200": {
+            "description": "Operación exitosa",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean", "example": true },
+                    "mensaje": { "type": "string", "example": "Cola limpiada" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "summary": "Obtener configuración",
+        "description": "Devuelve los valores actuales de UI + TTS",
+        "responses": {
+          "200": {
+            "description": "Configuración actual",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "textColor": { "type": "string", "example": "#eb8352" },
+                    "messageColor": { "type": "string", "example": "#f0f0f0" },
+                    "background": { "type": "string", "example": "rgba(10, 10, 20, 0.92)" },
+                    "borderColor": { "type": "string", "example": "#ea8352" },
+                    "barGradient": { "type": "string", "example": "linear-gradient(90deg, #eb8352, #ea8352)" },
+                    "voiceLang": { "type": "string", "example": "es-ES" },
+                    "voiceRate": { "type": "number", "example": 1.05 },
+                    "voicePitch": { "type": "number", "example": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Actualizar configuración UI/TTS",
+        "description": "Guarda nuevo estilo de notificación y parámetros de voz",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "textColor": { "type": "string", "example": "#ff00ff" },
+                  "messageColor": { "type": "string", "example": "#ffffff" },
+                  "background": { "type": "string", "example": "#0f0f1f" },
+                  "borderColor": { "type": "string", "example": "#00ffff" },
+                  "barGradient": { "type": "string", "example": "linear-gradient(90deg, #ff00ff, #00ffff)" },
+                  "voiceLang": { "type": "string", "example": "es-ES" },
+                  "voiceRate": { "type": "number", "format": "float", "minimum": 0.5, "maximum": 2.0, "example": 1.2 },
+                  "voicePitch": { "type": "number", "format": "float", "minimum": 0.0, "maximum": 2.0, "example": 1.1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Configuración actualizada",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean", "example": true },
+                    "config": {
+                      "type": "object",
+                      "properties": {
+                        "textColor": { "type": "string" },
+                        "messageColor": { "type": "string" },
+                        "background": { "type": "string" },
+                        "borderColor": { "type": "string" },
+                        "barGradient": { "type": "string" },
+                        "voiceLang": { "type": "string" },
+                        "voiceRate": { "type": "number" },
+                        "voicePitch": { "type": "number" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

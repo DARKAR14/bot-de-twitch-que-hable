@@ -154,131 +154,216 @@
     const elBadge = document.getElementById('cola-badge');
     const elBarra = document.getElementById('barra');
 
-    // Cola local en el navegador (por si llegan varios a la vez)
-    let colaLocal = [];
+    const colaLocal = [];
+    const idsVistos = new Set();
     let reproduciendo = false;
-
-    // ── WebSocket ────────────────────────────────────────────────
+    let currentConfig = {};
     let ws;
-    let wsReconectando = false;
+    let reconnectTimer;
+    let currentId = null;
+    let audioActual = null;
+    let utteranceActual = null;
+    let finalizarActual = null;
+    let ackPendiente = null;
+
+    async function cargarConfig() {
+      try {
+        const resp = await fetch('/api/config');
+        if (!resp.ok) throw new Error(`Status ${resp.status}`);
+        currentConfig = await resp.json();
+        notif.style.background = currentConfig.background;
+        notif.style.borderColor = currentConfig.borderColor;
+        elUsuario.style.color = currentConfig.textColor;
+        elMensaje.style.color = currentConfig.messageColor;
+        elBarra.style.background = currentConfig.barGradient;
+      } catch (err) {
+        console.warn('No se pudo cargar config:', err);
+      }
+    }
+
+    function enviarTerminado(id) {
+      ackPendiente = id;
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ tipo: 'terminado', id }));
+        return true;
+      }
+      return false;
+    }
 
     function conectarWS() {
+      clearTimeout(reconnectTimer);
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      // ngrok-skip-browser-warning se pasa como query param para WS
-      ws = new WebSocket(`${proto}://${location.host}?ngrok-skip-browser-warning=true`);
+      const token = new URLSearchParams(location.search).get('token');
+      const query = token ? `?token=${encodeURIComponent(token)}` : '';
+      ws = new WebSocket(`${proto}://${location.host}/ws${query}`);
 
       ws.onopen = () => {
-        wsReconectando = false;
         console.log('WS conectado');
+        if (ackPendiente) enviarTerminado(ackPendiente);
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.tipo === 'nuevo') {
+          if (data.tipo === 'nuevo' && typeof data.id === 'string') {
+            if (idsVistos.has(data.id)) {
+              // Si el ACK anterior se perdio durante una desconexion, el servidor
+              // reenviara el activo. Repetimos el ACK en vez de reproducirlo otra vez.
+              if (ackPendiente === data.id) enviarTerminado(data.id);
+              return;
+            }
+            idsVistos.add(data.id);
+            if (idsVistos.size > 500) idsVistos.delete(idsVistos.values().next().value);
             colaLocal.push(data);
             if (!reproduciendo) reproducirSiguiente();
+          } else if (data.tipo === 'confirmado' && data.id === ackPendiente) {
+            ackPendiente = null;
+          } else if (data.tipo === 'cancelar') {
+            colaLocal.splice(0, colaLocal.length);
+            if (data.id === ackPendiente) ackPendiente = null;
+            if (data.id === currentId && finalizarActual) {
+              finalizarActual({ confirmar: false, cancelar: true });
+            }
           }
-        } catch (e) { /* ignorar */ }
+        } catch (err) {
+          console.warn('Mensaje WS invalido:', err);
+        }
       };
 
       ws.onclose = () => {
         console.warn('WS cerrado, reconectando en 3s...');
-        if (!wsReconectando) {
-          wsReconectando = true;
-          setTimeout(conectarWS, 3000);
+        // Una fuente que pierde el rol principal no debe seguir sonando mientras
+        // el servidor promueve otra fuente OBS. Al reconectar, el ID se puede
+        // recibir de nuevo y reproducir desde un unico cliente.
+        if (
+          currentId &&
+          finalizarActual &&
+          !finalizarActual.estaFinalizado()
+        ) {
+          idsVistos.delete(currentId);
+          finalizarActual({ confirmar: false, cancelar: true });
         }
+        reconnectTimer = setTimeout(conectarWS, 3000);
       };
-
       ws.onerror = () => ws.close();
     }
 
-    // ── TTS ──────────────────────────────────────────────────────
+    function limpiarReproductor() {
+      if (audioActual) {
+        audioActual.pause();
+        audioActual.removeAttribute('src');
+        audioActual.load();
+      }
+      audioActual = null;
+      if (utteranceActual) window.speechSynthesis.cancel();
+      utteranceActual = null;
+    }
+
+    function crearFinalizador(id) {
+      let finalizado = false;
+      let timeoutFallback = null;
+
+      const finalizar = ({ confirmar = true, cancelar = false } = {}) => {
+        if (finalizado) return;
+        finalizado = true;
+        if (timeoutFallback) clearTimeout(timeoutFallback);
+        finalizar.timeoutFallback = null;
+        if (cancelar) limpiarReproductor();
+        if (confirmar) enviarTerminado(id);
+
+        notif.classList.remove('entrando');
+        notif.classList.add('saliendo');
+        setTimeout(() => {
+          limpiarReproductor();
+          notif.style.display = 'none';
+          elBarra.style.transition = '';
+          elBarra.style.transform = 'scaleX(1)';
+          currentId = null;
+          finalizarActual = null;
+          reproducirSiguiente();
+        }, 400);
+      };
+
+      finalizar.setTimeoutFallback = (timer) => { timeoutFallback = timer; };
+      finalizar.estaFinalizado = () => finalizado;
+      return finalizar;
+    }
+
     function reproducirSiguiente() {
       if (colaLocal.length === 0) {
         reproduciendo = false;
         return;
       }
-
       reproduciendo = true;
-      const entrada = colaLocal.shift();
-      reproducir(entrada);
+      reproducir(colaLocal.shift());
     }
 
-    function reproducir({ id, usuario, mensaje, audioBase64 }) {
+    function reproducir({ id, usuario, mensaje, audioBase64, audioMime }) {
+      currentId = id;
+      const finalizar = crearFinalizador(id);
+      finalizarActual = finalizar;
+      let fallbackIniciado = false;
+      const iniciarFallback = () => {
+        if (fallbackIniciado) return;
+        fallbackIniciado = true;
+        limpiarReproductor();
+        usarFallbackTTS(mensaje, finalizar);
+      };
+
       elUsuario.textContent = usuario;
       elMensaje.textContent = mensaje;
-      elBadge.textContent = colaLocal.length > 0 ? `+${colaLocal.length} en cola` : '';
-
+      elBadge.textContent = colaLocal.length ? `+${colaLocal.length} en cola` : '';
       notif.style.display = 'flex';
       notif.classList.remove('saliendo');
       notif.classList.add('entrando');
 
-      const alTerminar = () => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ tipo: 'terminado', id }));
-        }
-        notif.classList.remove('entrando');
-        notif.classList.add('saliendo');
-        setTimeout(() => {
-          notif.style.display = 'none';
-          elBarra.style.transition = '';
-          elBarra.style.transform = 'scaleX(1)';
-          reproducirSiguiente();
-        }, 400);
-      };
-
-      if (audioBase64) {
-        // ── Reproducir MP3 como base64 ───────────────────────────
-        const audioSrc = `data:audio/mp3;base64,${audioBase64}`;
-        const audioEl = new Audio(audioSrc);
-        audioEl.volume = 1;
-
-        // OBS bloquea autoplay con sonido, trick: empezar muteado y desmutear
-        audioEl.muted = true;
-        audioEl.addEventListener('canplaythrough', () => {
-          audioEl.muted = false;
-        });
-
-        audioEl.addEventListener('loadedmetadata', () => {
-          const duracion = audioEl.duration * 1000;
-          elBarra.style.transition = `transform ${duracion}ms linear`;
-          void elBarra.offsetWidth;
-          elBarra.style.transform = 'scaleX(0)';
-        });
-
-        audioEl.addEventListener('ended', alTerminar);
-        audioEl.addEventListener('error', (e) => {
-          console.warn('Error reproduciendo audio:', e);
-          alTerminar();
-        });
-
-        audioEl.play().catch((e) => {
-          console.warn('Play falló:', e);
-          alTerminar();
-        });
-
-      } else {
-        usarFallbackTTS(mensaje, alTerminar);
+      if (!audioBase64) {
+        usarFallbackTTS(mensaje, finalizar);
+        return;
       }
+
+      audioActual = new Audio(`data:${audioMime || 'audio/mpeg'};base64,${audioBase64}`);
+      audioActual.volume = 1;
+      audioActual.addEventListener('loadedmetadata', () => {
+        const duracion = Math.max(500, audioActual.duration * 1000);
+        elBarra.style.transition = `transform ${duracion}ms linear`;
+        void elBarra.offsetWidth;
+        elBarra.style.transform = 'scaleX(0)';
+      }, { once: true });
+      audioActual.addEventListener('ended', () => finalizar(), { once: true });
+      audioActual.addEventListener('error', () => {
+        console.warn('Audio remoto invalido; usando voz del navegador');
+        iniciarFallback();
+      }, { once: true });
+      audioActual.play().catch(() => {
+        console.warn('Autoplay fallo; usando voz del navegador');
+        iniciarFallback();
+      });
     }
 
-    function usarFallbackTTS(mensaje, alTerminar) {
+    function usarFallbackTTS(mensaje, finalizar) {
       const duracion = Math.max(2000, mensaje.length * 75);
       elBarra.style.transition = `transform ${duracion}ms linear`;
       void elBarra.offsetWidth;
       elBarra.style.transform = 'scaleX(0)';
 
-      const utterance = new SpeechSynthesisUtterance(mensaje);
-      utterance.lang = 'es-ES';
-      utterance.rate = 1.05;
-      const timeout = setTimeout(alTerminar, duracion + 2000);
-      utterance.onend = () => { clearTimeout(timeout); alTerminar(); };
-      utterance.onerror = alTerminar;
-      window.speechSynthesis.speak(utterance);
+      utteranceActual = new SpeechSynthesisUtterance(mensaje);
+      utteranceActual.lang = currentConfig.voiceLang || 'es-ES';
+      utteranceActual.rate = currentConfig.voiceRate || 1.05;
+      utteranceActual.pitch = currentConfig.voicePitch || 1;
+      const timeout = setTimeout(() => {
+        window.speechSynthesis.cancel();
+        finalizar();
+      }, duracion + 4000);
+      finalizar.setTimeoutFallback(timeout);
+      utteranceActual.onend = () => finalizar();
+      utteranceActual.onerror = () => finalizar();
+      window.speechSynthesis.speak(utteranceActual);
     }
 
+    cargarConfig();
     conectarWS();
+    setInterval(cargarConfig, 15000);
   </script>
 </body>
 

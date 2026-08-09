@@ -1,147 +1,214 @@
 // ============================================
-//  websocket.js - Gestión de clientes OBS
-//  Mejoras: detección de clientes zombie,
-//           estadísticas de uptime, logger
+//  websocket.js - Un unico reproductor OBS activo
 // ============================================
 
 const WebSocket = require("ws");
+const CONFIG = require("./config");
 const { createLogger } = require("./logger");
 
 const log = createLogger("WS");
 
-let wss = null;
-let clients = new Map(); // Map<ws, { connectedAt, lastPong, ip }>
+function crearHub({ logger = log, maxPayload = CONFIG.WS_MAX_PAYLOAD } = {}) {
+  let wss = null;
+  const clients = new Map();
+  let principal = null;
+  let heartbeat = null;
+  let onTerminado = null;
+  let onConectado = null;
 
-function inicializar(server) {
-  wss = new WebSocket.Server({ server });
-
-  wss.on("connection", (ws, req) => {
-    const ip =
-      req.headers["x-forwarded-for"] ||
-      req.socket.remoteAddress ||
-      "desconocida";
-
-    // Registrar cliente con metadata
-    clients.set(ws, {
-      connectedAt: Date.now(),
-      lastPong: Date.now(),
-      ip,
-      isAlive: true,
-    });
-
-    log.info(`OBS conectado desde ${ip} | Clientes activos: ${clients.size}`);
-
-    if (typeof onConectado === "function") onConectado();
-
-    // ── Heartbeat: ping cada 30s ───────────────────────────────
-    // Si el cliente no responde al ping en 30s más, se considera zombie y se cierra
-    const pingInterval = setInterval(() => {
-      const meta = clients.get(ws);
-      if (!meta) return clearInterval(pingInterval);
-
-      if (!meta.isAlive) {
-        // No respondió al último ping → cliente zombie, cerrar
-        log.warn(`Cliente zombie detectado (${ip}), cerrando conexión...`);
-        clients.delete(ws);
-        clearInterval(pingInterval);
-        return ws.terminate();
-      }
-
-      meta.isAlive = false; // Lo marcamos como "pendiente de pong"
-      ws.ping();
-    }, 30000);
-
-    ws.on("pong", () => {
-      const meta = clients.get(ws);
-      if (meta) {
-        meta.isAlive = true;
-        meta.lastPong = Date.now();
-      }
-    });
-
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data);
-        if (msg.tipo === "terminado") {
-          if (typeof onTerminado === "function") onTerminado(msg.id);
-        }
-      } catch {
-        // mensaje no JSON, ignorar
-      }
-    });
-
-    ws.on("close", () => {
-      const meta = clients.get(ws);
-      const uptime = meta
-        ? Math.round((Date.now() - meta.connectedAt) / 1000)
-        : 0;
-      clients.delete(ws);
-      clearInterval(pingInterval);
-      log.info(
-        `OBS desconectado (uptime: ${uptime}s) | Clientes activos: ${clients.size}`,
-      );
-    });
-
-    ws.on("error", (err) => {
-      log.warn(`Error en cliente WS (${ip})`, err.message);
-      clients.delete(ws);
-      clearInterval(pingInterval);
-    });
-  });
-}
-
-let onTerminado = null;
-let onConectado = null;
-
-function alTerminar(callback) {
-  onTerminado = callback;
-}
-function alConectar(callback) {
-  onConectado = callback;
-}
-
-function enviar(data) {
-  if (clients.size === 0) {
-    log.warn("No hay clientes OBS conectados — mensaje descartado");
-    return false;
+  function enviarA(client, data) {
+    if (!client || client.readyState !== WebSocket.OPEN) return false;
+    try {
+      client.send(JSON.stringify(data));
+      return true;
+    } catch (err) {
+      logger.warn("No se pudo enviar por WebSocket", err.message);
+      return false;
+    }
   }
 
-  const payload = JSON.stringify(data);
-  let enviado = 0;
+  function ejecutarCallback(callback, ...args) {
+    if (typeof callback !== "function") return;
+    Promise.resolve(callback(...args)).catch((err) => {
+      logger.error("Error en callback WebSocket", err.message);
+    });
+  }
 
-  clients.forEach((meta, client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
-      enviado++;
+  function confirmarTerminado(client, id) {
+    Promise.resolve()
+      .then(() => (typeof onTerminado === "function" ? onTerminado(id) : false))
+      .catch((err) => {
+        logger.error("Error confirmando reproduccion WebSocket", err.message);
+      })
+      .finally(() => {
+        // Confirma la recepcion incluso si el ACK era duplicado. Asi el navegador
+        // puede dejar de reenviarlo sin arriesgar que la cola quede bloqueada.
+        enviarA(client, { tipo: "confirmado", id });
+      });
+  }
+
+  function promover(client) {
+    if (!client || !clients.has(client) || client.readyState !== WebSocket.OPEN) {
+      return false;
     }
-  });
+    principal = client;
+    enviarA(client, { tipo: "rol", rol: "principal" });
+    logger.info(`OBS principal asignado | Clientes: ${clients.size}`);
+    ejecutarCallback(onConectado);
+    return true;
+  }
 
-  log.info(`Enviado a ${enviado}/${clients.size} clientes OBS`);
-  return enviado > 0;
-}
+  function promoverSiguiente() {
+    principal = null;
+    for (const client of clients.keys()) {
+      if (promover(client)) return;
+    }
+  }
 
-// ── Estadísticas de conexión ───────────────────────────────────
-function estadisticas() {
-  const ahora = Date.now();
+  function inicializar(server) {
+    if (wss) return wss;
+    wss = new WebSocket.Server({
+      server,
+      path: "/ws",
+      maxPayload,
+      perMessageDeflate: false,
+    });
+
+    wss.on("connection", (client, req) => {
+      const requestUrl = new URL(req.url, "http://localhost");
+      if (
+        CONFIG.WS_TOKEN &&
+        requestUrl.searchParams.get("token") !== CONFIG.WS_TOKEN
+      ) {
+        logger.warn("Conexion WS rechazada por token invalido");
+        client.close(1008, "No autorizado");
+        return;
+      }
+
+      const ip = String(
+        req.headers["x-forwarded-for"] || req.socket.remoteAddress || "desconocida",
+      ).split(",")[0].trim();
+
+      clients.set(client, {
+        connectedAt: Date.now(),
+        lastPong: Date.now(),
+        isAlive: true,
+        ip,
+      });
+
+      logger.info(`OBS conectado desde ${ip} | Clientes: ${clients.size}`);
+      if (!principal) promover(client);
+      else enviarA(client, { tipo: "rol", rol: "espera" });
+
+      client.on("pong", () => {
+        const meta = clients.get(client);
+        if (meta) {
+          meta.isAlive = true;
+          meta.lastPong = Date.now();
+        }
+      });
+
+      client.on("message", (raw) => {
+        if (client !== principal) return;
+        try {
+          const msg = JSON.parse(raw.toString("utf8"));
+          if (
+            msg.tipo === "terminado" &&
+            typeof msg.id === "string" &&
+            msg.id.length <= 100
+          ) {
+            confirmarTerminado(client, msg.id);
+          }
+        } catch {
+          logger.debug("Mensaje WebSocket invalido ignorado");
+        }
+      });
+
+      const quitar = () => {
+        const eraPrincipal = client === principal;
+        clients.delete(client);
+        if (eraPrincipal) promoverSiguiente();
+        logger.info(`OBS desconectado | Clientes: ${clients.size}`);
+      };
+
+      client.once("close", quitar);
+      client.once("error", (err) => {
+        logger.warn(`Error WS de ${ip}`, err.message);
+      });
+    });
+
+    wss.on("error", (err) => logger.error("Error en servidor WS", err.message));
+
+    heartbeat = setInterval(() => {
+      for (const [client, meta] of clients) {
+        if (!meta.isAlive) {
+          logger.warn(`Cerrando cliente WS sin respuesta: ${meta.ip}`);
+          client.terminate();
+          continue;
+        }
+        meta.isAlive = false;
+        client.ping();
+      }
+    }, 30_000);
+    heartbeat.unref?.();
+
+    return wss;
+  }
+
+  function enviar(data) {
+    if (!principal) {
+      logger.debug("No hay OBS principal conectado");
+      return false;
+    }
+    return enviarA(principal, data);
+  }
+
+  function alTerminar(callback) {
+    onTerminado = callback;
+  }
+
+  function alConectar(callback) {
+    onConectado = callback;
+  }
+
+  function estadisticas() {
+    const ahora = Date.now();
+    return {
+      total: clients.size,
+      principal: principal ? clients.get(principal)?.ip || true : null,
+      clientes: [...clients.entries()].map(([client, meta]) => ({
+        ip: meta.ip,
+        rol: client === principal ? "principal" : "espera",
+        uptimeSegundos: Math.round((ahora - meta.connectedAt) / 1000),
+        ultimoPongSegundos: Math.round((ahora - meta.lastPong) / 1000),
+      })),
+    };
+  }
+
+  function clientesActivos() {
+    return clients.size;
+  }
+
+  function cerrar() {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+    for (const client of clients.keys()) client.terminate();
+    clients.clear();
+    principal = null;
+    if (wss) wss.close();
+    wss = null;
+  }
+
   return {
-    total: clients.size,
-    clientes: [...clients.values()].map((meta) => ({
-      ip: meta.ip,
-      uptimeSegundos: Math.round((ahora - meta.connectedAt) / 1000),
-      ultimoPong: Math.round((ahora - meta.lastPong) / 1000),
-    })),
+    inicializar,
+    enviar,
+    alTerminar,
+    alConectar,
+    clientesActivos,
+    estadisticas,
+    cerrar,
   };
 }
 
-function clientesActivos() {
-  return clients.size;
-}
-
-module.exports = {
-  inicializar,
-  enviar,
-  alTerminar,
-  alConectar,
-  clientesActivos,
-  estadisticas,
-};
+const hub = crearHub();
+module.exports = { ...hub, crearHub };

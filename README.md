@@ -1,195 +1,115 @@
-# 🎙️ BOT !habla — TTS para Twitch + OBS.
+# TTS Bot para Twitch + OBS
 
-Bot de Text-to-Speech para Twitch que convierte mensajes del chat en audio y los muestra como overlay animado en OBS Studio.
+Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordenada y reproduce cada mensaje una sola vez en un Browser Source de OBS.
 
----
+## Caracteristicas
 
-## ✨ ¿Qué hace?
+- Un unico cliente OBS principal reproduce audio; conexiones adicionales quedan en espera.
+- Confirmaciones idempotentes: un ACK repetido no puede avanzar dos veces la cola.
+- Deduplicacion por ID real del mensaje de Twitch.
+- Cola local en memoria con escritura atomica a `data/queue.json`.
+- Gemini TTS opcional para una voz mas natural.
+- Respaldo automatico con Google Translate TTS y, si ambos fallan, voz del navegador.
+- Espanol, ingles, japones, ruso y portugues.
+- Sin MongoDB, Mongoose ni servicios de persistencia externos.
 
-Cuando un espectador escribe `!habla <mensaje>` en el chat de Twitch, el bot:
-1. Genera el audio con Google Translate TTS (gratis, sin API key)
-2. Muestra un overlay animado en OBS con el nombre del usuario y el mensaje
-3. Reproduce el audio en tiempo real
-4. Gestiona una cola para que los mensajes se reproduzcan en orden
+## Requisitos
 
----
+- Node.js 20.19 o posterior.
+- Una cuenta de Twitch para el bot.
+- OBS Studio.
+- API key de Gemini opcional.
 
-## 📁 Estructura del proyecto
-
-```
-BOT-DE-TWITCH-QUE-HABLE/
-├── bot.js                  # Punto de entrada principal
-├── obs.html                # Overlay para OBS (browser source)
-├── package.json
-├── discloud.config         # Config para deploy en Discloud
-├── .gitignore
-│
-├── src/
-│   ├── config.js           # Configuración central (variables de entorno)
-│   ├── twitch.js           # Conexión al chat de Twitch (tmi.js)
-│   ├── tts.js              # Generación de audio con Google Translate
-│   ├── queue.js            # Cola de mensajes (persistida en JSON)
-│   ├── websocket.js        # Comunicación en tiempo real con OBS
-│   └── antibot.js          # Detección de bots y spam (requiere MongoDB)
-│
-├── font/
-│   └── njnaruto.ttf        # Fuente personalizada del overlay
-│
-└── svg/
-    ├── image.svg
-    └── svgviewer-output.svg  # Ícono animado del overlay
-```
-
----
-
-## ⚙️ Configuración
-
-Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
-
-```env
-# Twitch
-BOT_USERNAME=nombre_de_tu_bot
-BOT_TOKEN=oauth:xxxxxxxxxxxxxxxxxxxx   # Obtén en twitchapps.com/tmi
-CANAL=tu_canal_sin_hash
-
-# Servidor (opcional, para deploy en la nube)
-APP_URL=https://tu-app.onrender.com
-
-# MongoDB (opcional, para el sistema antibot)
-MONGODB_URI=mongodb+srv://...
-MONGODB_DB=hablabot
-```
-
-> El token del bot se obtiene en [twitchapps.com/tmi](https://twitchapps.com/tmi) iniciando sesión con la cuenta del bot.
-
-### Opciones adicionales en `src/config.js`
-
-| Variable | Por defecto | Descripción |
-|---|---|---|
-| `PREFIJO_COMANDO` | `!habla` | Comando que activa el TTS |
-| `COOLDOWN_SEGUNDOS` | `10` | Segundos de espera entre usos por usuario |
-| `SOLO_SUBS` | `false` | Restringir el comando solo a suscriptores |
-| `MAX_CARACTERES` | `150` | Límite de caracteres por mensaje |
-| `MAX_COLA` | `20` | Máximo de mensajes en cola simultáneos |
-| `TTS_LANG` | `es-ES` | Idioma de la voz |
-
----
-
-## 🚀 Instalación y uso
-
-### Requisitos
-
-- Node.js v18 o superior
-- npm
-
-### Pasos
+## Instalacion
 
 ```bash
-# 1. Clona el repositorio
-git clone <url-del-repo>
-cd BOT-DE-TWITCH-QUE-HABLE
-
-# 2. Instala las dependencias
 npm install
-
-# 3. Crea y configura el archivo .env (ver sección anterior)
-
-# 4. Inicia el bot
+copy .env.example .env
 npm start
-
-# O en modo desarrollo (con auto-reinicio)
-npm run dev
 ```
 
-El servidor arrancará en el puerto `3000`.
+Configura al menos estas variables en `.env`:
 
----
-
-## 📺 Configurar OBS
-
-1. En OBS, agrega una nueva fuente del tipo **Browser Source**
-2. Usa la siguiente URL:
-   ```
-   http://localhost:3000
-   ```
-   *(Si el bot está en la nube, usa la URL pública)*
-3. Configura el tamaño recomendado: **1920 × 1080**
-4. Activa la opción **"Control audio via OBS"** si quieres controlar el volumen desde OBS
-
-El overlay aparecerá en la esquina inferior izquierda con animación de entrada/salida.
-
----
-
-## 🤖 Comandos disponibles
-
-| Comando | Quién puede usarlo | Descripción |
-|---|---|---|
-| `!habla <mensaje>` | Todos (o solo subs si `SOLO_SUBS=true`) | Añade un mensaje a la cola TTS |
-| `!addbot <patrón>` | Solo moderadores | Agrega un patrón al filtro antibot |
-
----
-
-## 🛡️ Sistema Antibot (opcional)
-
-Si configuras `MONGODB_URI`, el bot activa protección automática contra spam:
-
-- **Detección por patrones**: filtra mensajes que contengan frases comunes de bots (venta de viewers, spam de follows, etc.)
-- **Baneo automático**: ejecuta `/ban` al detectar un bot
-- **Limpieza de repeticiones**: convierte `AAAAAAA` en `AAAA` para evitar spam sonoro
-- **Patrones editables**: los mods pueden agregar nuevos patrones con `!addbot`
-
-Sin MongoDB configurado, el antibot simplemente se desactiva sin afectar el funcionamiento del bot.
-
----
-
-## 🌐 Deploy en la nube
-
-### Discloud
-
-El proyecto incluye `discloud.config` listo para usar:
-
-```ini
-TYPE=bot
-MAIN=bot.js
-RAM=100
-AUTORESTART=true
-START=npm start
-BUILD=npm install
+```env
+BOT_USERNAME=nombre_del_bot
+BOT_TOKEN=oauth:token_de_twitch
+CANAL=canal_sin_hash
 ```
 
-Sube el proyecto a [discloud.app](https://discloud.app) y configura las variables de entorno en el panel.
+No guardes tokens ni API keys en Git.
 
-### Render / Railway
+## Gemini TTS
 
-1. Conecta tu repositorio
-2. Configura las variables de entorno en el panel
-3. Establece `APP_URL` con la URL pública de tu servicio (el bot se hará ping cada 4 minutos para no dormir en planes gratuitos de Render)
+Para usar una voz mas natural:
 
----
+```env
+TTS_PROVIDER=auto
+GEMINI_API_KEY=tu_api_key
+GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+GEMINI_TTS_VOICE=Aoede
+GEMINI_TTS_STYLE="cheerful, warm, spontaneous and natural Colombian woman from the Caribbean coast, with a subtle costeño accent"
+```
 
-## 🔌 Endpoints HTTP
+`auto` usa Gemini cuando existe una clave. Si Gemini falla por cuota, timeout o un error temporal, el bot usa Google Translate. Sin clave, Google es el proveedor normal.
 
-| Método | Ruta | Descripción |
+La voz, modelo y estilo se pueden cambiar con `GEMINI_TTS_VOICE`, `GEMINI_TTS_MODEL` y `GEMINI_TTS_STYLE`.
+
+## Comandos
+
+| Comando | Idioma |
+|---|---|
+| `!habla texto` | Espanol |
+| `!speak text` | Ingles |
+| `!onichan texto` | Japones |
+| `!sukablad texto` | Ruso |
+| `!cr7 texto` | Portugues |
+| `!cola` | Estado de la cola, solo mods |
+| `!limpiar` | Cancela el audio y limpia la cola, solo mods |
+
+## OBS
+
+Agrega un Browser Source con la URL del servidor, por ejemplo:
+
+```text
+http://localhost:3000/
+```
+
+El navegador abre internamente el WebSocket `/ws`. Si hay dos Browser Sources abiertos, solo el mas antiguo reproduce; si se desconecta, el siguiente toma el control.
+
+En un servidor publico puedes definir `WS_TOKEN` y agregarlo a la URL de OBS:
+
+```text
+https://tu-servidor.example/?token=el_mismo_WS_TOKEN
+```
+
+## Endpoints
+
+| Metodo | Ruta | Descripcion |
 |---|---|---|
-| `GET` | `/` | Sirve el overlay de OBS |
-| `GET` | `/cola` | Muestra el estado actual de la cola (JSON) |
-| `DELETE` | `/cola` | Limpia toda la cola manualmente |
-| `GET` | `/audio/:archivo` | Sirve los archivos de audio generados |
+| GET | `/` | Overlay OBS |
+| GET | `/config` | Panel visual |
+| GET | `/cola` o `/api/cola` | Cola sin rutas internas |
+| DELETE | `/cola` | Cancela y limpia la cola |
+| GET | `/stats` | Estado de cola, playback y WebSocket |
+| GET/POST | `/api/config` | Apariencia y fallback del navegador |
+| POST | `/admin/servicio/:accion` | Control Render; requiere `ADMIN_TOKEN` |
 
----
+Las acciones administrativas aceptan `Authorization: Bearer <ADMIN_TOKEN>` o `X-Admin-Token`.
 
-## 🧰 Tecnologías usadas
+## Verificacion
 
-- **[tmi.js](https://tmijs.com/)** — Conexión al chat de Twitch
-- **[ws](https://github.com/websockets/ws)** — WebSocket para comunicación con OBS
-- **[express](https://expressjs.com/)** — Servidor HTTP
-- **[mongoose](https://mongoosejs.com/) / MongoDB** — Persistencia del sistema antibot
-- **Google Translate TTS** — Síntesis de voz gratuita sin API key
+```bash
+npm run check
+npm test
+npm audit --omit=dev
+```
 
----
+## Flujo de reproduccion
 
-## 📝 Notas
+1. Twitch agrega una entrada en estado `generando`.
+2. El proveedor TTS genera un archivo unico para ese ID.
+3. El controlador envia solo la primera entrada lista al OBS principal.
+4. OBS reproduce y envia un unico `terminado`.
+5. El servidor acepta el ACK solo si coincide con el ID activo, elimina el audio y avanza.
 
-- Los archivos de audio se eliminan automáticamente después de reproducirse y también se limpian los que tienen más de 10 minutos de antigüedad.
-- La cola se persiste en `data/queue.json` y se limpia al reiniciar el bot para evitar reproducir mensajes de sesiones anteriores.
-- Si OBS no está conectado cuando llega un mensaje, el mensaje queda en cola y se envía automáticamente cuando OBS se reconecte.
+Una reconexion puede reenviar solamente el elemento que seguia activo; no puede crear nuevas entradas ni saltar mensajes.

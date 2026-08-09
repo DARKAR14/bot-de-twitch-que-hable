@@ -1,75 +1,114 @@
 // ============================================
-//   config.js - Configuración central del bot.
+//  config.js - Configuracion central del bot
 // ============================================
 
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 
 const { createLogger } = require("./logger");
 const log = createLogger("CONFIG");
 
+function numeroEntero(nombre, fallback, minimo, maximo) {
+  const valor = Number.parseInt(process.env[nombre], 10);
+  if (!Number.isFinite(valor)) return fallback;
+  return Math.min(maximo, Math.max(minimo, valor));
+}
+
+function numeroDecimal(nombre, fallback, minimo, maximo) {
+  const valor = Number.parseFloat(process.env[nombre]);
+  if (!Number.isFinite(valor)) return fallback;
+  return Math.min(maximo, Math.max(minimo, valor));
+}
+
+const proveedorSolicitado = (process.env.TTS_PROVIDER || "auto").toLowerCase();
+const proveedorValido = ["auto", "gemini", "google"].includes(proveedorSolicitado)
+  ? proveedorSolicitado
+  : "auto";
+
 const CONFIG = {
-  // --- Twitch ---
+  // Twitch
+  BOT_USERNAME: process.env.BOT_USERNAME || "",
+  BOT_TOKEN: process.env.BOT_TOKEN || "",
+  CANAL: process.env.CANAL || "",
 
-  BOT_USERNAME: process.env.BOT_USERNAME || "nombre_de_tu_bot", // Cuenta Twitch del bot
-  BOT_TOKEN: process.env.BOT_TOKEN || "", // twitchapps.com/tmi
-  CANAL: process.env.CANAL || "", // Sin el #
-
-  // --- Servidor ---
-  // Ajuste para Render: PORT es la variable que ellos inyectan
-  PUERTO: parseInt(process.env.PORT) || parseInt(process.env.PUERTO) || 3000,
+  // Servidor
+  PUERTO: numeroEntero("PORT", numeroEntero("PUERTO", 3000, 1, 65535), 1, 65535),
   APP_URL: process.env.APP_URL || null,
+  DASHBOARD_ORIGIN:
+    process.env.DASHBOARD_ORIGIN || "https://darkops-dasboard.netlify.app",
+  ADMIN_TOKEN: process.env.ADMIN_TOKEN || null,
+  WS_TOKEN: process.env.WS_TOKEN || null,
+  WS_MAX_PAYLOAD: numeroEntero("WS_MAX_PAYLOAD", 64 * 1024, 1024, 1024 * 1024),
+  PLAYBACK_TIMEOUT_MS: numeroEntero(
+    "PLAYBACK_TIMEOUT_MS",
+    90_000,
+    10_000,
+    300_000,
+  ),
 
-  // --- Render API (Control de Instancia) ---
+  // Control opcional de Render
   RENDER: {
     API_KEY: process.env.RENDER_API_KEY || null,
     SERVICE_ID: process.env.RENDER_SERVICE_ID || null,
   },
 
-  // --- Comandos TTS por idioma ---
-  PREFIJO_COMANDO: "!habla", // es Español
-  PREFIJO_COMANDO_EN: "!speak", // us Inglés
-  PREFIJO_COMANDO_JP: "!onichan", // jp Japonés
-  PREFIJO_COMANDO_RU: "!sukablad", // ru Ruso
-  PREFIJO_COMANDO_PT: "!cr7", // br Portugués
+  // Comandos TTS por idioma
+  PREFIJO_COMANDO: "!habla",
+  PREFIJO_COMANDO_EN: "!speak",
+  PREFIJO_COMANDO_JP: "!onichan",
+  PREFIJO_COMANDO_RU: "!sukablad",
+  PREFIJO_COMANDO_PT: "!cr7",
 
-  // --- Comportamiento ---
-  COOLDOWN_SEGUNDOS: parseInt(process.env.COOLDOWN_SEGUNDOS) || 10,
+  // Comportamiento
+  COOLDOWN_SEGUNDOS: numeroEntero("COOLDOWN_SEGUNDOS", 10, 0, 3600),
   SOLO_SUBS: process.env.SOLO_SUBS === "true",
-  MAX_CARACTERES: parseInt(process.env.MAX_CARACTERES) || 150,
-  MAX_COLA: parseInt(process.env.MAX_COLA) || 20,
+  MAX_CARACTERES: numeroEntero("MAX_CARACTERES", 150, 1, 500),
+  MAX_COLA: numeroEntero("MAX_COLA", 20, 1, 100),
 
-  // --- TTS ---
-  TTS_RATE: parseFloat(process.env.TTS_RATE) || 1.05,
-  TTS_PITCH: parseFloat(process.env.TTS_PITCH) || 1,
+  // Voz
+  TTS_PROVIDER: proveedorValido,
+  TTS_CONCURRENCY: numeroEntero("TTS_CONCURRENCY", 2, 1, 5),
+  TTS_REQUEST_TIMEOUT_MS: numeroEntero(
+    "TTS_REQUEST_TIMEOUT_MS",
+    25_000,
+    5_000,
+    60_000,
+  ),
+  TTS_RETRIES: numeroEntero("TTS_RETRIES", 2, 1, 4),
+  TTS_RATE: numeroDecimal("TTS_RATE", 1.05, 0.5, 2),
+  TTS_PITCH: numeroDecimal("TTS_PITCH", 1, 0, 2),
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || null,
+  GEMINI_TTS_MODEL:
+    process.env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts",
+  GEMINI_TTS_VOICE: process.env.GEMINI_TTS_VOICE || "Aoede",
+  GEMINI_TTS_STYLE:
+    process.env.GEMINI_TTS_STYLE ||
+    "cheerful, warm, spontaneous and natural Colombian woman from the Caribbean coast, with a subtle costeño accent, expressive conversational intonation, a lively medium pace and clear diction; sound human rather than robotic or like an announcer, and never caricature or exaggerate the accent",
 };
 
-// ── Validación al arrancar ─────────────────────────────────────
-// Quitamos BOT_USERNAME de aquí para que use el default si no está en el ENV
-const REQUERIDAS = ["BOT_TOKEN", "CANAL"];
-
 function validate() {
-  const faltantes = REQUERIDAS.filter((k) => !CONFIG[k]);
+  const requeridas = ["BOT_USERNAME", "BOT_TOKEN", "CANAL"];
+  const faltantes = requeridas.filter((clave) => !CONFIG[clave]);
 
   if (faltantes.length > 0) {
-    log.error("Faltan variables de entorno obligatorias:");
-    faltantes.forEach((k) => log.error(`  → ${k} no está definida`));
-    log.error("Crea un archivo .env en la raíz con esas variables y reinicia.");
-    process.exit(1);
+    throw new Error(
+      `Faltan variables de entorno obligatorias: ${faltantes.join(", ")}`,
+    );
   }
 
-  if (!CONFIG.APP_URL)
-    log.warn("APP_URL no configurado — ping propio desactivado");
-  
-  // Log para saber si Render API está listo
-  if (!CONFIG.RENDER.API_KEY || !CONFIG.RENDER.SERVICE_ID)
-    log.warn("RENDER_API no configurada — botones de instancia no funcionarán");
+  if (CONFIG.TTS_PROVIDER === "gemini" && !CONFIG.GEMINI_API_KEY) {
+    log.warn(
+      "TTS_PROVIDER=gemini sin GEMINI_API_KEY; se usara Google Translate como respaldo",
+    );
+  }
+
+  const proveedorEfectivo =
+    CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
+      ? "google"
+      : "gemini";
 
   log.info(`Canal: #${CONFIG.CANAL} | Puerto: ${CONFIG.PUERTO}`);
   log.info(
-    `Comandos: ${CONFIG.PREFIJO_COMANDO} (ES) | ${CONFIG.PREFIJO_COMANDO_EN} (EN) | ${CONFIG.PREFIJO_COMANDO_JP} (JP) | ${CONFIG.PREFIJO_COMANDO_RU} (RU) | ${CONFIG.PREFIJO_COMANDO_PT} (PT)`,
-  );
-  log.info(
-    `Cooldown: ${CONFIG.COOLDOWN_SEGUNDOS}s | Max chars: ${CONFIG.MAX_CARACTERES} | Max cola: ${CONFIG.MAX_COLA}`,
+    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""}`,
   );
 }
 

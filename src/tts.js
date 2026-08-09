@@ -1,248 +1,339 @@
 // ============================================
-//  tts.js - Google Translate TTS
-//  Mejoras: retry con backoff, límite de caché,
-//           logger centralizado
+//  tts.js - Gemini TTS con respaldo Google Translate
 // ============================================
 
-const https = require("https");
-const fs = require("fs");
-const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
+const https = require("https");
+const path = require("path");
+const CONFIG = require("./config");
 const { createLogger } = require("./logger");
 
 const log = createLogger("TTS");
 const AUDIO_DIR = path.join(__dirname, "../data/audio");
-const MAX_CHARS = 100;
+const GOOGLE_MAX_CHARS = 100;
+const MAX_RESPONSE_BYTES = 15 * 1024 * 1024;
 
-// Caché: si supera 50MB se eliminan los archivos más viejos
-const MAX_CACHE_MB = 50;
+let trabajosActivos = 0;
+const trabajosPendientes = [];
 
 function inicializar() {
-  if (!fs.existsSync(AUDIO_DIR)) fs.mkdirSync(AUDIO_DIR, { recursive: true });
+  fs.mkdirSync(AUDIO_DIR, { recursive: true });
 }
 
-function nombreArchivo(texto) {
-  const hash = crypto.createHash("md5").update(texto).digest("hex").slice(0, 8);
-  return `tts_${hash}.mp3`;
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ── Retry con backoff exponencial ─────────────────────────────
-// Antes: si Google TTS fallaba 1 vez → el mensaje se perdía
-// Ahora: reintenta hasta 3 veces esperando 1s, 2s, 4s entre intentos
-async function conRetry(fn, intentos = 3, delayMs = 1000) {
+function verificarContinuacion(debeContinuar) {
+  if (typeof debeContinuar !== "function" || debeContinuar()) return;
+  const error = new Error("Generacion TTS cancelada porque el mensaje ya no esta en cola");
+  error.code = "TTS_CANCELLED";
+  error.retryable = false;
+  throw error;
+}
+
+async function conRetry(fn, intentos = CONFIG.TTS_RETRIES) {
   let ultimoError;
-  for (let i = 0; i < intentos; i++) {
+  for (let intento = 1; intento <= intentos; intento += 1) {
     try {
       return await fn();
     } catch (err) {
       ultimoError = err;
-      if (i < intentos - 1) {
-        const espera = delayMs * Math.pow(2, i); // 1s → 2s → 4s
-        log.warn(
-          `Intento ${i + 1}/${intentos} fallido: ${err.message}. Reintentando en ${espera}ms...`,
-        );
-        await new Promise((r) => setTimeout(r, espera));
-      }
+      if (intento === intentos || err.retryable === false) break;
+      const pausa = 500 * 2 ** (intento - 1);
+      log.warn(`TTS intento ${intento}/${intentos} fallo; retry en ${pausa}ms`, err.message);
+      await esperar(pausa);
     }
   }
   throw ultimoError;
 }
 
-// ── Límite de tamaño de caché ──────────────────────────────────
-// Si la carpeta de audio supera MAX_CACHE_MB, elimina los archivos
-// más viejos hasta bajar del límite
-function limpiarCacheSiNecesario() {
-  try {
-    const archivos = fs
-      .readdirSync(AUDIO_DIR)
-      .map((f) => {
-        const ruta = path.join(AUDIO_DIR, f);
-        const stat = fs.statSync(ruta);
-        return { ruta, size: stat.size, mtime: stat.mtimeMs };
-      })
-      .sort((a, b) => a.mtime - b.mtime); // más viejos primero
-
-    const totalBytes = archivos.reduce((acc, f) => acc + f.size, 0);
-    const totalMB = totalBytes / (1024 * 1024);
-
-    if (totalMB <= MAX_CACHE_MB) return;
-
-    log.warn(
-      `Caché de audio: ${totalMB.toFixed(1)}MB — límite ${MAX_CACHE_MB}MB. Limpiando...`,
-    );
-
-    let liberado = 0;
-    for (const archivo of archivos) {
+function ejecutarLimitado(fn) {
+  return new Promise((resolve, reject) => {
+    const ejecutar = async () => {
+      trabajosActivos += 1;
       try {
-        fs.unlinkSync(archivo.ruta);
-        liberado += archivo.size;
-        log.debug(`Caché: eliminado ${path.basename(archivo.ruta)}`);
-      } catch {}
-      // Parar cuando hayamos liberado suficiente
-      if ((totalBytes - liberado) / (1024 * 1024) <= MAX_CACHE_MB * 0.8) break;
-    }
-  } catch (err) {
-    log.warn("Error limpiando caché", err.message);
-  }
+        resolve(await fn());
+      } catch (err) {
+        reject(err);
+      } finally {
+        trabajosActivos -= 1;
+        trabajosPendientes.shift()?.();
+      }
+    };
+
+    if (trabajosActivos < CONFIG.TTS_CONCURRENCY) ejecutar();
+    else trabajosPendientes.push(ejecutar);
+  });
 }
 
-// ── División en chunks ─────────────────────────────────────────
+function peticionBuffer(url, { method = "GET", headers = {}, body = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { method, headers }, (res) => {
+      const chunks = [];
+      let total = 0;
+
+      res.on("data", (chunk) => {
+        total += chunk.length;
+        if (total > MAX_RESPONSE_BYTES) {
+          const error = new Error("Respuesta TTS demasiado grande");
+          error.retryable = false;
+          req.destroy(error);
+          return;
+        }
+        chunks.push(chunk);
+      });
+
+      res.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const detalle = buffer.toString("utf8").slice(0, 300);
+          const error = new Error(`HTTP ${res.statusCode}: ${detalle}`);
+          error.retryable = res.statusCode === 429 || res.statusCode >= 500;
+          reject(error);
+          return;
+        }
+        resolve({ buffer, headers: res.headers });
+      });
+    });
+
+    req.setTimeout(CONFIG.TTS_REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error("Timeout solicitando audio TTS"));
+    });
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
 
 function dividirEnChunks(texto) {
-  if (texto.length <= MAX_CHARS) return [texto];
-
-  const chunks = [];
+  if (texto.length <= GOOGLE_MAX_CHARS) return [texto];
+  const resultado = [];
   const frases = texto.split(/(?<=[.!?,;])\s+/);
   let actual = "";
 
   for (const frase of frases) {
-    if ((actual + " " + frase).trim().length <= MAX_CHARS) {
-      actual = (actual + " " + frase).trim();
-    } else {
-      if (actual) chunks.push(actual);
-      if (frase.length > MAX_CHARS) {
-        const palabras = frase.split(" ");
-        actual = "";
-        for (const palabra of palabras) {
-          if ((actual + " " + palabra).trim().length <= MAX_CHARS) {
-            actual = (actual + " " + palabra).trim();
-          } else {
-            if (actual) chunks.push(actual);
-            actual = palabra;
+    const candidata = `${actual} ${frase}`.trim();
+    if (candidata.length <= GOOGLE_MAX_CHARS) {
+      actual = candidata;
+      continue;
+    }
+    if (actual) resultado.push(actual);
+    actual = "";
+    for (const palabra of frase.split(/\s+/)) {
+      const parte = `${actual} ${palabra}`.trim();
+      if (parte.length <= GOOGLE_MAX_CHARS) actual = parte;
+      else {
+        if (actual) resultado.push(actual);
+        if (palabra.length <= GOOGLE_MAX_CHARS) actual = palabra;
+        else {
+          for (let i = 0; i < palabra.length; i += GOOGLE_MAX_CHARS) {
+            resultado.push(palabra.slice(i, i + GOOGLE_MAX_CHARS));
           }
+          actual = "";
         }
-      } else {
-        actual = frase;
       }
     }
   }
-  if (actual) chunks.push(actual);
-  return chunks.filter(Boolean);
+  if (actual) resultado.push(actual);
+  return resultado.filter(Boolean);
 }
 
-// ── Descarga de un chunk (con retry) ──────────────────────────
-
-function descargarChunk(texto, idioma = "es") {
-  return conRetry(
-    () =>
-      new Promise((resolve, reject) => {
-        const cacheKey = `${idioma}:${texto}`;
-        const archivo = path.join(AUDIO_DIR, nombreArchivo(cacheKey));
-
-        if (fs.existsSync(archivo)) return resolve(archivo);
-
-        const textoCodificado = encodeURIComponent(texto);
-        const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${textoCodificado}&tl=${idioma}&client=tw-ob`;
-
-        const req = https.get(
-          url,
-          {
-            headers: {
-              "User-Agent":
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-              Referer: "https://translate.google.com/",
-            },
-          },
-          (res) => {
-            if (res.statusCode !== 200) {
-              return reject(new Error(`HTTP ${res.statusCode}`));
-            }
-            const stream = fs.createWriteStream(archivo);
-            res.pipe(stream);
-            stream.on("finish", () => resolve(archivo));
-            stream.on("error", reject);
-          },
-        );
-
-        req.on("error", reject);
-        req.setTimeout(10000, () => {
-          req.destroy();
-          reject(new Error("Timeout al descargar audio"));
-        });
-      }),
-  );
+function nombreSeguro(id) {
+  if (id) return String(id).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+  return crypto.randomUUID();
 }
 
-// ── Generación del audio completo ─────────────────────────────
+function escribirAtomico(ruta, buffer) {
+  const temporal = `${ruta}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporal, buffer);
+  fs.renameSync(temporal, ruta);
+}
 
-async function generarAudio(texto, idioma = "es") {
-  inicializar();
-  limpiarCacheSiNecesario();
+function pcmAFormatoWav(pcm, sampleRate = 24_000, channels = 1, bits = 16) {
+  const header = Buffer.alloc(44);
+  const byteRate = (sampleRate * channels * bits) / 8;
+  const blockAlign = (channels * bits) / 8;
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bits, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
 
-  const archivoFinal = path.join(
-    AUDIO_DIR,
-    nombreArchivo(`FULL:${idioma}:${texto}`),
-  );
-  if (fs.existsSync(archivoFinal)) {
-    log.debug(`TTS desde caché (${idioma})`);
-    return archivoFinal;
-  }
+const nombresIdioma = {
+  es: "Spanish",
+  en: "English",
+  ja: "Japanese",
+  ru: "Russian",
+  pt: "Brazilian Portuguese",
+};
 
-  const chunks = dividirEnChunks(texto);
-  const flag = idioma === "es" ? "🇪🇸" : "🇺🇸";
-  log.info(
-    `${flag} Generando audio | ${chunks.length} chunk(s) | "${texto.slice(0, 40)}${texto.length > 40 ? "..." : ""}"`,
-  );
+async function generarGemini(texto, idioma, id) {
+  if (!CONFIG.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY no configurada");
 
-  if (chunks.length === 1) {
-    const archivo = await descargarChunk(chunks[0], idioma);
-    log.info("Audio generado correctamente (1 chunk)");
-    return archivo;
-  }
+  const prompt = [
+    "Generate speech only.",
+    `Read the transcript exactly as written in ${nombresIdioma[idioma] || "Spanish"}.`,
+    `Use a ${CONFIG.GEMINI_TTS_STYLE} voice.`,
+    "Do not add, remove, translate, or explain any words.",
+    "TRANSCRIPT:",
+    texto,
+  ].join("\n");
 
-  const archivos = await Promise.all(
-    chunks.map((c) => descargarChunk(c, idioma)),
-  );
-  const buffers = archivos.map((f) => fs.readFileSync(f));
-  const combinado = Buffer.concat(buffers);
-  fs.writeFileSync(archivoFinal, combinado);
-
-  archivos.forEach((f) => {
-    try {
-      fs.unlinkSync(f);
-    } catch {}
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: CONFIG.GEMINI_TTS_VOICE },
+        },
+      },
+    },
   });
 
-  log.info(`Audio generado correctamente (${chunks.length} chunks combinados)`);
-  return archivoFinal;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(CONFIG.GEMINI_TTS_MODEL)}:generateContent`;
+  const { buffer } = await conRetry(() =>
+    peticionBuffer(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+        "x-goog-api-key": CONFIG.GEMINI_API_KEY,
+      },
+      body,
+    }),
+  );
+
+  let respuesta;
+  try {
+    respuesta = JSON.parse(buffer.toString("utf8"));
+  } catch {
+    const error = new Error("Gemini devolvio JSON invalido");
+    error.retryable = true;
+    throw error;
+  }
+
+  const data = respuesta.candidates?.[0]?.content?.parts?.find(
+    (parte) => parte.inlineData?.data,
+  )?.inlineData?.data;
+  if (!data) {
+    const motivo = respuesta.promptFeedback?.blockReason || "respuesta sin audio";
+    const error = new Error(`Gemini TTS: ${motivo}`);
+    error.retryable = true;
+    throw error;
+  }
+
+  const pcm = Buffer.from(data, "base64");
+  const wav = pcmAFormatoWav(pcm);
+  const rutaAudio = path.join(AUDIO_DIR, `tts_${nombreSeguro(id)}.wav`);
+  escribirAtomico(rutaAudio, wav);
+  return { rutaAudio, mimeType: "audio/wav", provider: "gemini" };
 }
 
-// ── Utilidades ─────────────────────────────────────────────────
+async function descargarGoogle(texto, idioma) {
+  const query = new URLSearchParams({
+    ie: "UTF-8",
+    q: texto,
+    tl: idioma,
+    client: "tw-ob",
+  });
+  const url = `https://translate.google.com/translate_tts?${query}`;
+  const { buffer } = await peticionBuffer(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      Referer: "https://translate.google.com/",
+    },
+  });
+  return buffer;
+}
+
+async function generarGoogle(texto, idioma, id, debeContinuar) {
+  const chunks = dividirEnChunks(texto);
+  const buffers = [];
+  for (const chunk of chunks) {
+    verificarContinuacion(debeContinuar);
+    buffers.push(await conRetry(() => descargarGoogle(chunk, idioma)));
+  }
+  const rutaAudio = path.join(AUDIO_DIR, `tts_${nombreSeguro(id)}.mp3`);
+  escribirAtomico(rutaAudio, Buffer.concat(buffers));
+  return { rutaAudio, mimeType: "audio/mpeg", provider: "google" };
+}
+
+async function generarAudio(texto, idioma = "es", { id, debeContinuar } = {}) {
+  inicializar();
+  return ejecutarLimitado(async () => {
+    verificarContinuacion(debeContinuar);
+    const usarGemini =
+      CONFIG.TTS_PROVIDER !== "google" && Boolean(CONFIG.GEMINI_API_KEY);
+
+    if (usarGemini) {
+      try {
+        log.info(`Generando voz Gemini (${CONFIG.GEMINI_TTS_VOICE}) para ${id || "mensaje"}`);
+        return await generarGemini(texto, idioma, id);
+      } catch (err) {
+        log.warn("Gemini TTS fallo; usando respaldo Google", err.message);
+      }
+    }
+
+    verificarContinuacion(debeContinuar);
+    log.info(`Generando voz Google (${idioma}) para ${id || "mensaje"}`);
+    return generarGoogle(texto, idioma, id, debeContinuar);
+  });
+}
 
 function audioABase64(rutaArchivo) {
   try {
     return fs.readFileSync(rutaArchivo).toString("base64");
   } catch (err) {
-    log.error("Error leyendo audio", err.message);
+    log.warn("No se pudo leer el audio; se usara voz del navegador", err.message);
     return null;
   }
 }
 
 function eliminarAudio(rutaArchivo) {
+  if (!rutaArchivo) return;
   try {
-    if (fs.existsSync(rutaArchivo)) {
-      fs.unlinkSync(rutaArchivo);
-      log.debug(`Audio eliminado: ${path.basename(rutaArchivo)}`);
-    }
+    fs.rmSync(rutaArchivo, { force: true });
   } catch (err) {
-    log.warn("Error eliminando audio", err.message);
+    log.warn("No se pudo eliminar un audio", err.message);
   }
 }
 
-// Limpia audios con más de 10 minutos (archivos huérfanos)
 function limpiarAudiosViejos() {
   try {
+    inicializar();
     const ahora = Date.now();
-    fs.readdirSync(AUDIO_DIR).forEach((archivo) => {
+    for (const archivo of fs.readdirSync(AUDIO_DIR)) {
       const ruta = path.join(AUDIO_DIR, archivo);
-      if (ahora - fs.statSync(ruta).mtimeMs > 10 * 60 * 1000) {
-        fs.unlinkSync(ruta);
-        log.debug(`Audio viejo eliminado: ${archivo}`);
+      if (ahora - fs.statSync(ruta).mtimeMs > 15 * 60 * 1000) {
+        fs.rmSync(ruta, { force: true });
       }
-    });
-  } catch {}
+    }
+  } catch (err) {
+    log.debug("No se pudo limpiar la cache TTS", err.message);
+  }
 }
 
-setInterval(limpiarAudiosViejos, 10 * 60 * 1000);
+const limpieza = setInterval(limpiarAudiosViejos, 10 * 60 * 1000);
+limpieza.unref?.();
 
-module.exports = { generarAudio, eliminarAudio, audioABase64, AUDIO_DIR };
+module.exports = {
+  generarAudio,
+  eliminarAudio,
+  audioABase64,
+  limpiarAudiosViejos,
+  AUDIO_DIR,
+  _internals: { dividirEnChunks, pcmAFormatoWav, conRetry, verificarContinuacion },
+};
