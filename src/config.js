@@ -20,11 +20,24 @@ function numeroDecimal(nombre, fallback, minimo, maximo) {
 }
 
 const proveedorSolicitado = (process.env.TTS_PROVIDER || "auto").toLowerCase();
-const proveedorValido = ["auto", "fish", "gemini", "google"].includes(
+const proveedorValido = ["auto", "fish", "gemini", "puter", "google"].includes(
   proveedorSolicitado,
 )
   ? proveedorSolicitado
   : "auto";
+
+const proveedorPuterSolicitado = (
+  process.env.PUTER_TTS_PROVIDER || "xai"
+).toLowerCase();
+const proveedorPuterValido = [
+  "openai",
+  "gemini",
+  "xai",
+  "elevenlabs",
+  "aws-polly",
+].includes(proveedorPuterSolicitado)
+  ? proveedorPuterSolicitado
+  : "xai";
 
 const CONFIG = {
   // Twitch
@@ -121,6 +134,20 @@ const CONFIG = {
     process.env.GEMINI_COAST_STYLE ||
     "an unmistakably feminine adult Colombian woman from Barranquilla, with a warm medium-low contralto register that never sounds masculine, confident and assertive yet playful, a slightly husky natural texture, quick conversational cadence, crisp articulation, expressive pitch movement and a subtle Caribbean Colombian accent; use natural pauses, never sound like an announcer, never caricature the accent, and never imitate or claim to be a real person",
 
+  // Puter: respaldo adicional con consumo asociado a la cuenta del token
+  PUTER_AUTH_TOKEN: process.env.PUTER_AUTH_TOKEN || null,
+  PUTER_TTS_ENDPOINT:
+    process.env.PUTER_TTS_ENDPOINT || "https://api.puter.com/drivers/call",
+  PUTER_TTS_PROVIDER: proveedorPuterValido,
+  PUTER_TTS_MODEL: process.env.PUTER_TTS_MODEL || null,
+  PUTER_TTS_VOICE: process.env.PUTER_TTS_VOICE || null,
+  PUTER_TTS_STYLE:
+    process.env.PUTER_TTS_STYLE ||
+    "Speak as a cheerful, warm and spontaneous adult Colombian woman from the Caribbean coast, with natural conversational rhythm, expressive intonation and clear diction. Sound human, never robotic or like an announcer, and do not imitate a real person.",
+  PUTER_TTS_FORMAT: process.env.PUTER_TTS_FORMAT || "mp3",
+  PUTER_TTS_ENGINE: process.env.PUTER_TTS_ENGINE || "neural",
+  PUTER_TTS_ATTRIBUTION: process.env.PUTER_TTS_ATTRIBUTION || null,
+
   // Fish Audio (voz comunitaria; la atribucion se envia al dashboard)
   FISH_API_KEY: process.env.FISH_API_KEY || null,
   FISH_REFERENCE_ID:
@@ -195,6 +222,30 @@ const CONFIG = {
     1,
     10_000,
   ),
+  PUTER_TTS_COOLDOWN_SEGUNDOS: numeroEntero(
+    "PUTER_TTS_COOLDOWN_SEGUNDOS",
+    60,
+    0,
+    3600,
+  ),
+  PUTER_TTS_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "PUTER_TTS_GLOBAL_COOLDOWN_SEGUNDOS",
+    10,
+    0,
+    60,
+  ),
+  PUTER_TTS_LIMITE_DIARIO: numeroEntero(
+    "PUTER_TTS_LIMITE_DIARIO",
+    30,
+    1,
+    100_000,
+  ),
+  PUTER_TTS_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "PUTER_TTS_LIMITE_USUARIO_DIARIO",
+    3,
+    1,
+    10_000,
+  ),
   AI_COOLDOWN_SEGUNDOS: numeroEntero("AI_COOLDOWN_SEGUNDOS", 60, 0, 3600),
   AI_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
     "AI_GLOBAL_COOLDOWN_SEGUNDOS",
@@ -234,16 +285,27 @@ function validate() {
     );
   }
 
-  const proveedorEfectivo =
-    CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY
-      ? "fish"
-      : CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
-        ? "google"
-        : "gemini";
+  if (CONFIG.TTS_PROVIDER === "puter" && !CONFIG.PUTER_AUTH_TOKEN) {
+    log.warn(
+      "TTS_PROVIDER=puter sin PUTER_AUTH_TOKEN; se usara Google Translate como respaldo",
+    );
+  }
+
+  let proveedorEfectivo = "google";
+  if (CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY) {
+    proveedorEfectivo = "fish";
+  } else if (CONFIG.TTS_PROVIDER === "puter" && CONFIG.PUTER_AUTH_TOKEN) {
+    proveedorEfectivo = "puter";
+  } else if (CONFIG.TTS_PROVIDER === "gemini" && CONFIG.GEMINI_API_KEY) {
+    proveedorEfectivo = "gemini";
+  } else if (CONFIG.TTS_PROVIDER === "auto") {
+    if (CONFIG.GEMINI_API_KEY) proveedorEfectivo = "gemini";
+    else if (CONFIG.PUTER_AUTH_TOKEN) proveedorEfectivo = "puter";
+  }
 
   log.info(`Canal: #${CONFIG.CANAL} | Puerto: ${CONFIG.PUERTO}`);
   log.info(
-    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""} | !habla Gemini: ${CONFIG.GEMINI_COAST_VOICE} | Fish: ${CONFIG.FISH_API_KEY ? "configurado" : "sin API key"}`,
+    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""} | !habla Gemini: ${CONFIG.GEMINI_COAST_VOICE} | Fish: ${CONFIG.FISH_API_KEY ? "configurado" : "sin API key"} | Puter: ${CONFIG.PUTER_AUTH_TOKEN ? `${CONFIG.PUTER_TTS_PROVIDER} configurado` : "sin token"}`,
   );
   if (!CONFIG.CHAT_TOKEN) {
     log.warn("CHAT_TOKEN no configurado; /chat quedara abierto con limites antiabuso");

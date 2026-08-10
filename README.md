@@ -8,12 +8,12 @@ Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordena
 - Confirmaciones idempotentes: un ACK repetido no puede avanzar dos veces la cola.
 - Deduplicacion por ID real del mensaje de Twitch.
 - Cola local en memoria con escritura atomica a `data/queue.json`.
-- `!habla` alterna entre Gemini TTS y Fish Audio, con Google como respaldo final.
+- `!habla` alterna entre Gemini TTS y Fish Audio, prueba Puter y deja Google como respaldo final.
 - `!ia` responde preguntas breves, interpreta errores ortograficos y habla la respuesta.
 - Perfil Naruto independiente para `!naruto` y `!ia naruto`.
 - Chat privado en `/chat` para enviar TTS a OBS sin escribir en Twitch.
 - Limites diarios persistentes, enfriamiento por usuario, control de rafagas y cache.
-- Respaldo automatico con Google Translate TTS y, si ambos fallan, voz del navegador.
+- Respaldos automaticos con Puter, Google Translate TTS y, si todo falla, voz del navegador.
 - Espanol, ingles, japones, ruso y portugues.
 - Sin MongoDB, Mongoose ni servicios de persistencia externos.
 
@@ -24,6 +24,7 @@ Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordena
 - OBS Studio.
 - API key de Gemini para la voz natural y `!ia`.
 - API key de Fish Audio para la rotacion de `!habla` y `!ia diomedes`.
+- Opcional: una cuenta de Puter para habilitar un respaldo TTS adicional.
 
 ## Instalacion
 
@@ -55,7 +56,7 @@ GEMINI_TTS_VOICE=Aoede
 GEMINI_TTS_STYLE="cheerful, warm, spontaneous and natural Colombian woman from the Caribbean coast, with a subtle costeño accent"
 ```
 
-`auto` usa Gemini cuando existe una clave. Si Gemini falla por cuota, timeout o un error temporal, el bot usa Google Translate. Sin clave, Google es el proveedor normal.
+`auto` usa Gemini cuando existe una clave. Si Gemini falla por cuota, timeout o un error temporal, el bot prueba Puter cuando esta configurado y finalmente Google Translate. Sin Gemini ni Puter, Google es el proveedor normal.
 
 La voz, modelo y estilo se pueden cambiar con `GEMINI_TTS_VOICE`, `GEMINI_TTS_MODEL` y `GEMINI_TTS_STYLE`.
 
@@ -74,15 +75,50 @@ FISH_TTS_MODEL=s2.1-pro-free
 FISH_NARUTO_REFERENCE_ID=1412b58e859448d284f8f62391e82bd9
 ```
 
-El backend identifica esta salida como una voz IA no oficial y entrega la atribucion al dashboard mediante WebSocket, sin mostrarla dentro del overlay de OBS. Si Fish falla o alcanza su cuota, el circuito se pausa temporalmente y el audio prueba Gemini antes de usar Google.
+El backend identifica esta salida como una voz IA no oficial y entrega la atribucion al dashboard mediante WebSocket, sin mostrarla dentro del overlay de OBS. Si Fish falla o alcanza su cuota, el circuito se pausa temporalmente y el audio prueba Gemini, Puter y finalmente Google.
 
 `!ia` usa `gemini-3.5-flash-lite` para entender la pregunta, incluso con faltas de ortografia, y genera una respuesta corta con escritura correcta y un tono costeno natural. La personalidad de Gemini es original y no se presenta como una imitacion de una persona real. En el modo Diomedes, la narracion comienza con `Aqui mi compae {usuario} me pregunta: {pregunta}` y luego reproduce la respuesta.
+
+## Puter como respaldo
+
+Puter se ejecuta en el backend de Render y queda despues de Fish/Gemini pero antes de Google. De forma predeterminada utiliza xAI con la voz femenina `ara`, cálida y conversacional, mediante la cuenta Puter. Esto aporta diversidad real de proveedor si las cuotas principales fallan. No cambia los comandos ni requiere autenticar a los espectadores de Twitch.
+
+Obtiene el token una sola vez desde tu computador:
+
+```bash
+npm run puter:token
+```
+
+Se abrira el navegador para iniciar sesion en Puter. Copia la linea resultante al `.env` local y a las variables secretas de Render:
+
+```env
+PUTER_AUTH_TOKEN=tu_token_secreto
+PUTER_TTS_ENDPOINT=https://api.puter.com/drivers/call
+PUTER_TTS_PROVIDER=xai
+PUTER_TTS_MODEL=
+PUTER_TTS_VOICE=ara
+PUTER_TTS_STYLE="Speak as a cheerful, warm and spontaneous adult Colombian woman from the Caribbean coast, with natural conversational rhythm, expressive intonation and clear diction."
+PUTER_TTS_FORMAT=mp3
+```
+
+Solo `PUTER_AUTH_TOKEN` es necesario. xAI no necesita un modelo explicito y, si la voz queda vacia, el adaptador usa `ara`. Tambien puedes usar `eve` para un tono más alegre y energético. El token concede acceso a tu cuenta: no lo publiques, no lo envies por Twitch y no lo guardes en Git.
+
+La asignacion gratuita de Puter no es ilimitada. Para evitar otra rafaga de consumo, el respaldo tiene circuito por errores 401/402/403/429 y un presupuesto conservador configurable:
+
+```env
+PUTER_TTS_COOLDOWN_SEGUNDOS=60
+PUTER_TTS_GLOBAL_COOLDOWN_SEGUNDOS=10
+PUTER_TTS_LIMITE_DIARIO=30
+PUTER_TTS_LIMITE_USUARIO_DIARIO=3
+```
+
+Si Puter no tiene saldo, su token expiro o la solicitud se cuelga, el trabajo se cancela dentro del timeout general y la cola continua inmediatamente con Google. Se recomienda conservar `TTS_PROVIDER=auto` para mantener toda la cadena de respaldo.
 
 ## Comandos
 
 | Comando | Idioma |
 |---|---|
-| `!habla texto` | Espanol; alterna Fish/Gemini y respalda con Google |
+| `!habla texto` | Espanol; alterna Fish/Gemini, luego Puter y finalmente Google |
 | `!speak text` | Ingles |
 | `!onichan texto` | Japones |
 | `!sukablad texto` | Ruso |
@@ -141,7 +177,7 @@ La pagina mostrara un campo para el token. Tambien se puede abrir una vez con `/
 
 Las acciones administrativas aceptan `Authorization: Bearer <ADMIN_TOKEN>` o `X-Admin-Token`.
 
-`/stats` tambien informa cache, circuitos temporales y consumo diario. Los valores `FISH_*_LIMITE_*`, `GEMINI_TTS_*_LIMITE_*` y `AI_*_LIMITE_*` permiten ajustar el presupuesto. Los moderadores omiten el limite individual, pero no el limite diario ni el control global de rafagas.
+`/stats` tambien informa cache, circuitos temporales y consumo diario. Los valores `FISH_*_LIMITE_*`, `GEMINI_TTS_*_LIMITE_*`, `PUTER_TTS_*_LIMITE_*` y `AI_*_LIMITE_*` permiten ajustar el presupuesto. Los moderadores omiten el limite individual, pero no el limite diario ni el control global de rafagas.
 
 ## Verificacion
 

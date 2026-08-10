@@ -44,15 +44,16 @@ test("Fish recibe un payload estable con proteccion contra repeticiones", () => 
   );
 });
 
-test("la cadena balanceada prueba ambas voces antes de Google", () => {
+test("la cadena balanceada prueba las voces principales y Puter antes de Google", () => {
   assert.deepEqual(_internals.crearOrdenProveedores("balanced"), [
     "fish",
     "gemini",
+    "puter",
     "google",
   ]);
   assert.deepEqual(
-    _internals.crearOrdenProveedores("auto", ["gemini", "fish"]),
-    ["gemini", "fish", "google"],
+    _internals.crearOrdenProveedores("auto", ["gemini", "fish", "puter"]),
+    ["gemini", "fish", "puter", "google"],
   );
 });
 

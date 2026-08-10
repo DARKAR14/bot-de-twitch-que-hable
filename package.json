@@ -1,13 +1,14 @@
 {
   "name": "ttsbot",
   "version": "1.0.0",
-  "description": "Bot TTS para Twitch con OBS, Gemini, Fish Audio y respuestas IA",
+  "description": "Bot TTS para Twitch con OBS, Gemini, Fish Audio, Puter y respuestas IA",
   "main": "bot.js",
   "scripts": {
     "dev": "nodemon bot.js",
     "start": "node bot.js",
+    "puter:token": "node scripts/puter-token.js",
     "test": "node --test",
-    "check": "node --check bot.js && node --check src/ai.js && node --check src/config.js && node --check src/logger.js && node --check src/playback.js && node --check src/queue.js && node --check src/tts.js && node --check src/twitch.js && node --check src/usage.js && node --check src/websocket.js"
+    "check": "node --check bot.js && node --check scripts/puter-token.js && node --check src/ai.js && node --check src/config.js && node --check src/logger.js && node --check src/playback.js && node --check src/puter-tts.js && node --check src/queue.js && node --check src/tts.js && node --check src/twitch.js && node --check src/usage.js && node --check src/websocket.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "@heyputer/puter.js": "^2.5.4",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "tmi.js": "^1.8.5",

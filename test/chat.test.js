@@ -37,7 +37,7 @@ test("/chat separa el nombre visual del mensaje que recibe el TTS", () => {
       generarTts: (entrada, texto, idioma, opciones) => {
         generacion = { entrada, texto, idioma, opciones };
       },
-      obtenerOrden: () => ["gemini", "fish", "google"],
+      obtenerOrden: () => ["gemini", "fish", "puter", "google"],
       crearControl: () => () => true,
     },
   );
@@ -52,7 +52,12 @@ test("/chat separa el nombre visual del mensaje que recibe el TTS", () => {
   assert.equal(generacion.texto, entradaAgregada.mensaje);
   assert.doesNotMatch(generacion.texto, /Incógnito/);
   assert.equal(generacion.idioma, "es");
-  assert.deepEqual(generacion.opciones.providerOrder, ["gemini", "fish", "google"]);
+  assert.deepEqual(generacion.opciones.providerOrder, [
+    "gemini",
+    "fish",
+    "puter",
+    "google",
+  ]);
   assert.equal(resultado.voice, "auto");
   assert.equal(notificaciones, 1);
 });
@@ -102,7 +107,12 @@ test("/chat aplica Naruto por identificador sin incluir comandos en el mensaje",
   assert.equal(entradaAgregada.vozSeleccionada, "naruto");
   assert.equal(entradaAgregada.mensaje, "Bienvenidos al stream");
   assert.deepEqual(reglasReservadas.map(({ tipo }) => tipo), ["web_chat", "fish"]);
-  assert.deepEqual(generacion.opciones.providerOrder, ["fish", "gemini", "google"]);
+  assert.deepEqual(generacion.opciones.providerOrder, [
+    "fish",
+    "gemini",
+    "puter",
+    "google",
+  ]);
   assert.equal(
     generacion.opciones.fishReferenceId,
     "1412b58e859448d284f8f62391e82bd9",
@@ -119,7 +129,7 @@ test("el selector publica IDs estables y resuelve todos los perfiles", () => {
     ["auto", "gemini", "diomedes", "naruto", "google"],
   );
 
-  const ordenAuto = ["gemini", "fish", "google"];
+  const ordenAuto = ["gemini", "fish", "puter", "google"];
   const perfiles = Object.fromEntries(
     voces.map(({ id }) => [
       id,
@@ -127,7 +137,7 @@ test("el selector publica IDs estables y resuelve todos los perfiles", () => {
     ]),
   );
   assert.deepEqual(perfiles.auto.providerOrder, ordenAuto);
-  assert.deepEqual(perfiles.gemini.providerOrder, ["gemini", "google"]);
+  assert.deepEqual(perfiles.gemini.providerOrder, ["gemini", "puter", "google"]);
   assert.equal(perfiles.diomedes.providerOrder[0], "fish");
   assert.equal(perfiles.naruto.providerOrder[0], "fish");
   assert.deepEqual(perfiles.google.providerOrder, ["google"]);

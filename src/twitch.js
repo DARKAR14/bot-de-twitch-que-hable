@@ -58,7 +58,7 @@ const comandosTts = [
 ];
 
 const VOCES_WEB = Object.freeze([
-  { id: "auto", label: "Automática (Fish / Gemini)" },
+  { id: "auto", label: "Automática (Fish / Gemini / Puter)" },
   { id: "gemini", label: "Gemini costeña" },
   { id: "diomedes", label: "Diomedes · Fish Audio" },
   { id: "naruto", label: "Naruto · Fish Audio" },
@@ -136,8 +136,8 @@ function tomarOrdenHabla() {
   const principal = siguienteVozHabla;
   siguienteVozHabla = principal === "fish" ? "gemini" : "fish";
   return principal === "fish"
-    ? ["fish", "gemini", "google"]
-    : ["gemini", "fish", "google"];
+    ? ["fish", "gemini", "puter", "google"]
+    : ["gemini", "fish", "puter", "google"];
 }
 
 function normalizarIdVozWeb(valor) {
@@ -166,7 +166,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "gemini",
-      providerOrder: ["gemini", "google"],
+      providerOrder: ["gemini", "puter", "google"],
       reserva: "gemini_tts",
       preautorizado: "gemini",
       ...baseGemini,
@@ -176,7 +176,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "fish",
-      providerOrder: ["fish", "gemini", "google"],
+      providerOrder: ["fish", "gemini", "puter", "google"],
       reserva: "fish",
       preautorizado: "fish",
       fishReferenceId: CONFIG.FISH_REFERENCE_ID,
@@ -188,7 +188,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "fish",
-      providerOrder: ["fish", "gemini", "google"],
+      providerOrder: ["fish", "gemini", "puter", "google"],
       reserva: "fish",
       preautorizado: "fish",
       fishReferenceId: CONFIG.FISH_NARUTO_REFERENCE_ID,
@@ -228,6 +228,15 @@ function reglaUso(tipo) {
       limiteUsuario: CONFIG.GEMINI_TTS_LIMITE_USUARIO_DIARIO,
     };
   }
+  if (tipo === "puter_tts") {
+    return {
+      tipo,
+      cooldownMs: CONFIG.PUTER_TTS_COOLDOWN_SEGUNDOS * 1000,
+      globalCooldownMs: CONFIG.PUTER_TTS_GLOBAL_COOLDOWN_SEGUNDOS * 1000,
+      limiteDiario: CONFIG.PUTER_TTS_LIMITE_DIARIO,
+      limiteUsuario: CONFIG.PUTER_TTS_LIMITE_USUARIO_DIARIO,
+    };
+  }
   if (tipo === "web_chat") {
     return {
       tipo,
@@ -250,7 +259,11 @@ function crearControlProveedor(claveUsuario, esMod, preautorizados = []) {
   const autorizados = new Set(preautorizados);
   return (provider) => {
     if (autorizados.delete(provider)) return true;
-    const tipo = provider === "fish" ? "fish" : "gemini_tts";
+    const tipo = provider === "fish"
+      ? "fish"
+      : provider === "puter"
+        ? "puter_tts"
+        : "gemini_tts";
     const reserva = usage.reservarVarios([reglaUso(tipo)], {
       usuario: claveUsuario,
       bypassUsuario: esMod,
@@ -325,8 +338,8 @@ async function procesarIa({
     const usarFish = modoVoz === "fish" || modoVoz === "naruto";
     iniciarGeneracionTts(entrada, narracion, "es", {
       providerOrder: usarFish
-        ? ["fish", "gemini", "google"]
-        : ["gemini", "fish", "google"],
+        ? ["fish", "gemini", "puter", "google"]
+        : ["gemini", "fish", "puter", "google"],
       puedeUsarProveedor,
       fishReferenceId:
         modoVoz === "naruto" ? CONFIG.FISH_NARUTO_REFERENCE_ID : undefined,

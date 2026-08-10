@@ -75,17 +75,21 @@ test("!ia Diomedes presenta al usuario y su pregunta antes de responder", () => 
   );
 });
 
-test("!habla alterna Fish y Gemini manteniendo Google al final", () => {
+test("!habla alterna Fish y Gemini, luego usa Puter y deja Google al final", () => {
   const primera = _internals.tomarOrdenHabla();
   const segunda = _internals.tomarOrdenHabla();
   assert.notEqual(primera[0], segunda[0]);
   assert.deepEqual(new Set(primera.slice(0, 2)), new Set(["fish", "gemini"]));
+  assert.equal(primera.at(-2), "puter");
+  assert.equal(segunda.at(-2), "puter");
   assert.equal(primera.at(-1), "google");
   assert.equal(segunda.at(-1), "google");
 });
 
-test("Gemini TTS tiene presupuesto independiente de las respuestas IA", () => {
+test("Gemini y Puter TTS tienen presupuestos independientes de las respuestas IA", () => {
   assert.equal(_internals.reglaUso("gemini_tts").tipo, "gemini_tts");
   assert.ok(_internals.reglaUso("gemini_tts").limiteDiario > 0);
+  assert.equal(_internals.reglaUso("puter_tts").tipo, "puter_tts");
+  assert.ok(_internals.reglaUso("puter_tts").limiteDiario > 0);
   assert.equal(_internals.reglaUso("ai").tipo, "ai");
 });

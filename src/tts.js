@@ -1,5 +1,5 @@
 // ============================================
-//  tts.js - Gemini TTS con respaldo Google Translate
+//  tts.js - TTS multi-proveedor con respaldos Puter y Google Translate
 // ============================================
 
 const crypto = require("crypto");
@@ -8,6 +8,7 @@ const https = require("https");
 const path = require("path");
 const CONFIG = require("./config");
 const { createLogger } = require("./logger");
+const puterTts = require("./puter-tts");
 
 const log = createLogger("TTS");
 const AUDIO_DIR = path.join(__dirname, "../data/audio");
@@ -19,6 +20,7 @@ const trabajosPendientes = [];
 const cacheFish = new Map();
 let fishBloqueadoHasta = 0;
 let geminiBloqueadoHasta = 0;
+let puterBloqueadoHasta = 0;
 
 function inicializar() {
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
@@ -414,6 +416,26 @@ function abrirCircuitoGemini(error) {
   }
 }
 
+function abrirCircuitoPuter(error) {
+  const codigo = String(error.code || "").toLowerCase();
+  if (
+    error.statusCode === 402 ||
+    ["insufficient_funds", "usage_limited"].includes(codigo)
+  ) {
+    puterBloqueadoHasta = Date.now() + 60 * 60 * 1000;
+  } else if (error.statusCode === 429) {
+    puterBloqueadoHasta =
+      Date.now() + Math.max(error.retryAfterMs || 0, 5 * 60 * 1000);
+  } else if (
+    [401, 403].includes(error.statusCode) ||
+    ["token_auth_failed", "reauth_required", "puter_auth_required"].includes(
+      codigo,
+    )
+  ) {
+    puterBloqueadoHasta = Date.now() + 15 * 60 * 1000;
+  }
+}
+
 async function generarFish(
   texto,
   id,
@@ -532,19 +554,112 @@ async function generarGoogle(texto, idioma, id, debeContinuar, signal) {
   };
 }
 
+function extensionAudio(mimeType) {
+  const extensiones = {
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/ogg": "ogg",
+    "audio/opus": "opus",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+  };
+  return extensiones[String(mimeType || "").toLowerCase()] || "mp3";
+}
+
+async function generarPuter(
+  texto,
+  idioma,
+  id,
+  debeContinuar,
+  puedeUsarProveedor,
+  signal,
+) {
+  verificarSenal(signal);
+  if (!CONFIG.PUTER_AUTH_TOKEN) throw new Error("PUTER_AUTH_TOKEN no configurado");
+  if (Date.now() < puterBloqueadoHasta) {
+    const error = new Error("Puter TTS esta descansando temporalmente por limite o autenticacion");
+    error.code = "PUTER_TTS_CIRCUIT_OPEN";
+    error.retryable = false;
+    throw error;
+  }
+  if (
+    typeof puedeUsarProveedor === "function" &&
+    !(await puedeUsarProveedor("puter"))
+  ) {
+    throw errorProveedorOmitido("puter");
+  }
+
+  try {
+    const resultado = await conRetry(
+      () => {
+        verificarContinuacion(debeContinuar);
+        return puterTts.sintetizar(
+          texto,
+          idioma,
+          {
+            provider: CONFIG.PUTER_TTS_PROVIDER,
+            model: CONFIG.PUTER_TTS_MODEL,
+            voice: CONFIG.PUTER_TTS_VOICE,
+            style: CONFIG.PUTER_TTS_STYLE,
+            format: CONFIG.PUTER_TTS_FORMAT,
+            engine: CONFIG.PUTER_TTS_ENGINE,
+          },
+          {
+            authToken: CONFIG.PUTER_AUTH_TOKEN,
+            signal,
+            solicitar: (solicitud) => {
+              const body = JSON.stringify(solicitud);
+              return peticionBuffer(CONFIG.PUTER_TTS_ENDPOINT, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "text/plain;actually=json",
+                  "Content-Length": Buffer.byteLength(body),
+                },
+                body,
+                signal,
+              });
+            },
+          },
+        );
+      },
+      CONFIG.TTS_RETRIES,
+      signal,
+    );
+    verificarSenal(signal);
+    verificarContinuacion(debeContinuar);
+    const extension = extensionAudio(resultado.mimeType);
+    const rutaAudio = path.join(AUDIO_DIR, `tts_${nombreSeguro(id)}.${extension}`);
+    escribirAtomico(rutaAudio, resultado.buffer);
+    return {
+      rutaAudio,
+      mimeType: resultado.mimeType,
+      provider: "puter",
+      attribution:
+        CONFIG.PUTER_TTS_ATTRIBUTION ||
+        `Voz de respaldo · Puter (${CONFIG.PUTER_TTS_PROVIDER})`,
+    };
+  } catch (error) {
+    const normalizado = puterTts.normalizarError(error);
+    abrirCircuitoPuter(normalizado);
+    throw normalizado;
+  }
+}
+
 function crearOrdenProveedores(provider = "auto", providerOrder) {
-  const validos = new Set(["fish", "gemini", "google"]);
+  const validos = new Set(["fish", "gemini", "puter", "google"]);
   let orden;
   if (Array.isArray(providerOrder) && providerOrder.length > 0) {
     orden = providerOrder;
   } else {
     const efectivo = provider === "auto" ? CONFIG.TTS_PROVIDER : provider;
     if (efectivo === "fish" || efectivo === "balanced") {
-      orden = ["fish", "gemini", "google"];
+      orden = ["fish", "gemini", "puter", "google"];
+    } else if (efectivo === "puter") {
+      orden = ["puter", "google"];
     } else if (efectivo === "google") {
       orden = ["google"];
     } else {
-      orden = ["gemini", "google"];
+      orden = ["gemini", "puter", "google"];
     }
   }
 
@@ -664,6 +779,32 @@ async function generarAudio(
           continue;
         }
 
+        if (proveedor === "puter") {
+          if (!CONFIG.PUTER_AUTH_TOKEN) continue;
+          try {
+            log.info(
+              `Generando voz Puter (${CONFIG.PUTER_TTS_PROVIDER}) para ${id || "mensaje"}`,
+            );
+            return await generarPuter(
+              texto,
+              idioma,
+              id,
+              debeContinuar,
+              puedeUsarProveedor,
+              signal,
+            );
+          } catch (err) {
+            if (signal.aborted) throw errorDesdeSenal(signal);
+            if (err.code === "TTS_CANCELLED") throw err;
+            if (err.code === "TTS_PROVIDER_SKIPPED") {
+              log.debug("Puter omitido por presupuesto o cooldown");
+            } else {
+              log.warn("Puter TTS fallo; usando otro proveedor", err.message);
+            }
+          }
+          continue;
+        }
+
         log.info(`Generando voz Google (${idioma}) para ${id || "mensaje"}`);
         return generarGoogle(texto, idioma, id, debeContinuar, signal);
       }
@@ -722,6 +863,10 @@ function stats() {
     circuitoGeminiAbiertoSegundos: Math.max(
       0,
       Math.ceil((geminiBloqueadoHasta - Date.now()) / 1000),
+    ),
+    circuitoPuterAbiertoSegundos: Math.max(
+      0,
+      Math.ceil((puterBloqueadoHasta - Date.now()) / 1000),
     ),
   };
 }
