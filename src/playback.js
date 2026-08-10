@@ -16,16 +16,50 @@ function crearControlador({
   audio = tts,
   logger = log,
   timeoutMs = CONFIG.PLAYBACK_TIMEOUT_MS,
+  generationTimeoutMs = CONFIG.QUEUE_GENERATION_TIMEOUT_MS,
   advanceDelayMs = 150,
 } = {}) {
   let activoId = null;
   let timeout = null;
+  let generationTimeout = null;
+  let esperandoGeneracionId = null;
   let programado = false;
   let inicializado = false;
 
   function limpiarTimeout() {
     if (timeout) clearTimeout(timeout);
     timeout = null;
+  }
+
+  function limpiarTimeoutGeneracion() {
+    if (generationTimeout) clearTimeout(generationTimeout);
+    generationTimeout = null;
+    esperandoGeneracionId = null;
+  }
+
+  function vigilarGeneracion(entrada) {
+    if (esperandoGeneracionId === entrada.id && generationTimeout) return;
+    limpiarTimeoutGeneracion();
+    esperandoGeneracionId = entrada.id;
+    generationTimeout = setTimeout(() => {
+      generationTimeout = null;
+      esperandoGeneracionId = null;
+      const actual = cola.obtenerPrimero();
+      if (
+        !actual ||
+        actual.id !== entrada.id ||
+        actual.estado !== "generando"
+      ) {
+        return;
+      }
+      logger.warn(
+        `Generacion agotada para ${entrada.id}; usando respaldo del navegador`,
+      );
+      if (cola.marcarFallback(entrada.id, "Tiempo máximo de generación agotado")) {
+        notificarCambio();
+      }
+    }, generationTimeoutMs);
+    generationTimeout.unref?.();
   }
 
   function payloadDe(entrada) {
@@ -38,6 +72,8 @@ function crearControlador({
       usuario: entrada.usuario,
       mensaje: entrada.mensaje,
       idioma: entrada.idioma,
+      tipoContenido: entrada.tipo || "tts",
+      atribucion: entrada.atribucion || null,
       audioBase64,
       audioMime: audioBase64 ? entrada.audioMime || "audio/mpeg" : null,
       proveedorTts: entrada.proveedorTts || "navegador",
@@ -75,8 +111,16 @@ function crearControlador({
     if (activoId) return;
 
     const primero = cola.obtenerPrimero();
-    if (!primero || primero.estado !== "listo") return;
+    if (!primero) {
+      limpiarTimeoutGeneracion();
+      return;
+    }
+    if (primero.estado !== "listo") {
+      vigilarGeneracion(primero);
+      return;
+    }
 
+    limpiarTimeoutGeneracion();
     activoId = primero.id;
     enviarActivo("nuevo");
   }
@@ -119,6 +163,7 @@ function crearControlador({
     const activoAnterior = activoId;
     if (activoAnterior) socket.enviar({ tipo: "cancelar", id: activoAnterior });
     limpiarTimeout();
+    limpiarTimeoutGeneracion();
     activoId = null;
     const eliminadas = cola.limpiar();
     for (const entrada of eliminadas) {
@@ -128,11 +173,16 @@ function crearControlador({
   }
 
   function estado() {
-    return { activoId, esperandoAudio: cola.obtenerPrimero()?.estado === "generando" };
+    return {
+      activoId,
+      esperandoAudio: cola.obtenerPrimero()?.estado === "generando",
+      esperandoGeneracionId,
+    };
   }
 
   function detener() {
     limpiarTimeout();
+    limpiarTimeoutGeneracion();
   }
 
   return { inicializar, notificarCambio, completar, limpiar, estado, detener };

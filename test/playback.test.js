@@ -85,7 +85,7 @@ test("una rafaga mantiene FIFO y cada ID avanza exactamente una vez", async () =
   controlador.inicializar();
 
   const ids = [];
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 100; i += 1) {
     const entrada = cola.agregar({ usuario: `u${i}`, mensaje: `m${i}` });
     cola.actualizarAudio(entrada.id, { rutaAudio: `${i}.mp3` });
     ids.push(entrada.id);
@@ -102,6 +102,46 @@ test("una rafaga mantiene FIFO y cada ID avanza exactamente una vez", async () =
 
   assert.deepEqual(enviados.map((item) => item.id), ids);
   assert.equal(cola.total(), 0);
+  controlador.detener();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("una generacion atascada usa fallback y deja avanzar el siguiente audio", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ttsbot-playback-"));
+  const cola = crearCola(path.join(dir, "queue.json"), logger);
+  cola.inicializar();
+
+  const enviados = [];
+  let onTerminado;
+  const controlador = crearControlador({
+    cola,
+    socket: {
+      enviar(data) { enviados.push(data); return true; },
+      alTerminar(cb) { onTerminado = cb; },
+      alConectar() {},
+    },
+    audio: { audioABase64() { return "YQ=="; }, eliminarAudio() {} },
+    logger,
+    timeoutMs: 5000,
+    generationTimeoutMs: 25,
+    advanceDelayMs: 0,
+  });
+  controlador.inicializar();
+
+  const atascado = cola.agregar({ usuario: "uno", mensaje: "sin terminar" });
+  const siguiente = cola.agregar({ usuario: "dos", mensaje: "listo" });
+  cola.actualizarAudio(siguiente.id, { rutaAudio: "dos.mp3" });
+  controlador.notificarCambio();
+  await pausa(50);
+
+  assert.equal(enviados[0].id, atascado.id);
+  assert.equal(enviados[0].proveedorTts, "navegador");
+  assert.equal(cola.buscar(atascado.id).fallbackNavegador, true);
+  assert.equal(onTerminado(atascado.id), true);
+  await pausa(10);
+  assert.equal(enviados[1].id, siguiente.id);
+  assert.equal(onTerminado(siguiente.id), true);
+
   controlador.detener();
   fs.rmSync(dir, { recursive: true, force: true });
 });

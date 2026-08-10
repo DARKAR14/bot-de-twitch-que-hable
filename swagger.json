@@ -3,7 +3,7 @@
   "info": {
     "title": "TTS Bot API",
     "version": "1.0.0",
-    "description": "API para ver cola, limpiar cola y cambiar diseño/voz en tiempo real desde frontend."
+    "description": "API para enviar TTS privado, ver o limpiar la cola y cambiar el diseño en tiempo real."
   },
   "servers": [{ "url": "http://localhost:3000", "description": "Servidor local" }],
   "paths": {
@@ -93,6 +93,75 @@
         }
       }
     },
+    "/api/chat/config": {
+      "get": {
+        "summary": "Obtener configuración pública del chat privado",
+        "responses": {
+          "200": {
+            "description": "Límites y estado de autenticación",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authRequired": { "type": "boolean" },
+                    "maxName": { "type": "integer" },
+                    "maxMessage": { "type": "integer" },
+                    "cooldownSeconds": { "type": "integer" },
+                    "voices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["id", "label"],
+                        "properties": {
+                          "id": { "type": "string", "example": "naruto" },
+                          "label": { "type": "string", "example": "Naruto · Fish Audio" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "summary": "Enviar un mensaje privado a OBS",
+        "description": "Recibe {name, message, voice}. OBS muestra name y message; el TTS reproduce únicamente message con el perfil indicado por voice. Puede requerir X-Chat-Token.",
+        "security": [{}, { "ChatToken": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "message"],
+                "properties": {
+                  "name": { "type": "string", "example": "Invitado secreto" },
+                  "message": { "type": "string", "example": "Este texto se escucha en OBS" },
+                  "voice": {
+                    "type": "string",
+                    "enum": ["auto", "gemini", "diomedes", "naruto", "google"],
+                    "default": "auto",
+                    "example": "naruto"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": { "description": "Mensaje agregado a la cola" },
+          "400": { "description": "Campos inválidos" },
+          "401": { "description": "Token incorrecto" },
+          "429": { "description": "Cooldown, presupuesto agotado o cola llena" },
+          "503": { "description": "La voz seleccionada no está configurada" }
+        }
+      }
+    },
     "/api/config": {
       "get": {
         "summary": "Obtener configuración",
@@ -171,6 +240,15 @@
             }
           }
         }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ChatToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Chat-Token"
       }
     }
   }

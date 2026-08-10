@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chat privado TTS</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090812;
+      --panel: rgba(18, 16, 31, 0.94);
+      --accent: #eb8352;
+      --accent-2: #ffb27e;
+      --text: #f6f3ff;
+      --muted: #aaa4ba;
+      --error: #ff7c86;
+      --success: #75e0a7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at 15% 20%, rgba(235, 131, 82, 0.17), transparent 36%),
+        radial-gradient(circle at 85% 80%, rgba(122, 88, 255, 0.14), transparent 34%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(100%, 580px);
+      padding: clamp(24px, 5vw, 38px);
+      border: 1px solid rgba(235, 131, 82, 0.55);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48), 0 0 34px rgba(235, 131, 82, 0.12);
+      backdrop-filter: blur(18px);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent-2);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 7vw, 42px);
+      line-height: 1.05;
+    }
+
+    .intro {
+      margin: 14px 0 28px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    form {
+      display: grid;
+      gap: 18px;
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      color: #dcd7e8;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    input,
+    select,
+    textarea,
+    button {
+      width: 100%;
+      border-radius: 13px;
+      font: inherit;
+    }
+
+    input,
+    select,
+    textarea {
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      outline: none;
+      padding: 13px 15px;
+      background: rgba(7, 6, 14, 0.78);
+      color: var(--text);
+      transition: border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(235, 131, 82, 0.16);
+    }
+
+    textarea {
+      min-height: 138px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    .field-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    button {
+      border: 0;
+      padding: 14px 18px;
+      background: linear-gradient(135deg, var(--accent), #f4a061);
+      color: #160d09;
+      cursor: pointer;
+      font-weight: 900;
+      transition: transform 150ms ease, filter 150ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      filter: brightness(1.07);
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.62;
+    }
+
+    #status {
+      min-height: 22px;
+      margin: 16px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    #status.success {
+      color: var(--success);
+    }
+
+    #status.error {
+      color: var(--error);
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <p class="eyebrow">Darkar TTS</p>
+    <h1>Chat privado</h1>
+    <p class="intro">
+      Elige la voz y escribe solamente el mensaje: no necesitas comandos. El nombre aparece en OBS y nada se publica en Twitch.
+    </p>
+
+    <form id="chat-form">
+      <label>
+        Nombre que verá OBS
+        <input id="name" name="name" type="text" required autocomplete="nickname" />
+      </label>
+
+      <label id="token-field" hidden>
+        Token privado
+        <input id="token" name="token" type="password" autocomplete="off" />
+      </label>
+
+      <label>
+        Voz que se escuchará
+        <select id="voice" name="voice" required>
+          <option value="auto">Automática (Fish / Gemini)</option>
+        </select>
+      </label>
+
+      <label>
+        Mensaje que se escuchará
+        <textarea id="message" name="message" required></textarea>
+        <span class="field-meta">
+          <span>Ctrl + Enter para enviar</span>
+          <span id="counter">0 / 150</span>
+        </span>
+      </label>
+
+      <button id="send" type="submit">Enviar a OBS</button>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+    const form = document.getElementById('chat-form');
+    const nameInput = document.getElementById('name');
+    const voiceInput = document.getElementById('voice');
+    const messageInput = document.getElementById('message');
+    const tokenInput = document.getElementById('token');
+    const tokenField = document.getElementById('token-field');
+    const sendButton = document.getElementById('send');
+    const status = document.getElementById('status');
+    const counter = document.getElementById('counter');
+    let maxMessage = 150;
+
+    function setStatus(text, type = '') {
+      status.textContent = text;
+      status.className = type;
+    }
+
+    function updateCounter() {
+      counter.textContent = `${messageInput.value.length} / ${maxMessage}`;
+    }
+
+    async function loadConfig() {
+      const query = new URLSearchParams(location.search);
+      const queryToken = query.get('token');
+      if (queryToken) {
+        tokenInput.value = queryToken;
+        history.replaceState(null, '', location.pathname);
+      }
+      const previousName = sessionStorage.getItem('tts-chat-name');
+      if (previousName) nameInput.value = previousName;
+      const previousVoice = sessionStorage.getItem('tts-chat-voice') || 'auto';
+
+      try {
+        const response = await fetch('/api/chat/config', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const config = await response.json();
+        nameInput.maxLength = config.maxName || 30;
+        maxMessage = config.maxMessage || 150;
+        messageInput.maxLength = maxMessage;
+        tokenField.hidden = !config.authRequired;
+        tokenInput.required = Boolean(config.authRequired);
+        if (Array.isArray(config.voices) && config.voices.length > 0) {
+          voiceInput.replaceChildren();
+          for (const voice of config.voices) {
+            const option = document.createElement('option');
+            option.value = voice.id;
+            option.textContent = voice.label;
+            voiceInput.append(option);
+          }
+        }
+        if ([...voiceInput.options].some((option) => option.value === previousVoice)) {
+          voiceInput.value = previousVoice;
+        }
+        updateCounter();
+      } catch (error) {
+        setStatus('No se pudo cargar la configuración del chat.', 'error');
+      }
+    }
+
+    async function sendMessage(event) {
+      event.preventDefault();
+      const name = nameInput.value.trim();
+      const voice = voiceInput.value || 'auto';
+      const message = messageInput.value.trim();
+      if (!name || !message) return;
+
+      sendButton.disabled = true;
+      sendButton.textContent = 'Enviando…';
+      setStatus('Agregando el mensaje a la cola…');
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (tokenInput.value) headers['X-Chat-Token'] = tokenInput.value;
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ name, message, voice }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || `Error ${response.status}`);
+
+        sessionStorage.setItem('tts-chat-name', result.name || name);
+        sessionStorage.setItem('tts-chat-voice', result.voice || voice);
+        messageInput.value = '';
+        updateCounter();
+        setStatus(`Enviado con voz ${result.voice || voice}. Posición actual en la cola: ${result.position}.`, 'success');
+        messageInput.focus();
+      } catch (error) {
+        setStatus(error.message || 'No se pudo enviar el mensaje.', 'error');
+      } finally {
+        sendButton.disabled = false;
+        sendButton.textContent = 'Enviar a OBS';
+      }
+    }
+
+    messageInput.addEventListener('input', updateCounter);
+    messageInput.addEventListener('keydown', (event) => {
+      if (event.ctrlKey && event.key === 'Enter') form.requestSubmit();
+    });
+    form.addEventListener('submit', sendMessage);
+    loadConfig();
+  </script>
+</body>
+
+</html>

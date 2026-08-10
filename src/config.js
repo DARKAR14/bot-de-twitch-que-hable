@@ -20,7 +20,9 @@ function numeroDecimal(nombre, fallback, minimo, maximo) {
 }
 
 const proveedorSolicitado = (process.env.TTS_PROVIDER || "auto").toLowerCase();
-const proveedorValido = ["auto", "gemini", "google"].includes(proveedorSolicitado)
+const proveedorValido = ["auto", "fish", "gemini", "google"].includes(
+  proveedorSolicitado,
+)
   ? proveedorSolicitado
   : "auto";
 
@@ -37,10 +39,17 @@ const CONFIG = {
     process.env.DASHBOARD_ORIGIN || "https://darkops-dasboard.netlify.app",
   ADMIN_TOKEN: process.env.ADMIN_TOKEN || null,
   WS_TOKEN: process.env.WS_TOKEN || null,
+  CHAT_TOKEN: process.env.CHAT_TOKEN || null,
   WS_MAX_PAYLOAD: numeroEntero("WS_MAX_PAYLOAD", 64 * 1024, 1024, 1024 * 1024),
   PLAYBACK_TIMEOUT_MS: numeroEntero(
     "PLAYBACK_TIMEOUT_MS",
     90_000,
+    10_000,
+    300_000,
+  ),
+  QUEUE_GENERATION_TIMEOUT_MS: numeroEntero(
+    "QUEUE_GENERATION_TIMEOUT_MS",
+    100_000,
     10_000,
     300_000,
   ),
@@ -57,12 +66,30 @@ const CONFIG = {
   PREFIJO_COMANDO_JP: "!onichan",
   PREFIJO_COMANDO_RU: "!sukablad",
   PREFIJO_COMANDO_PT: "!cr7",
+  PREFIJO_COMANDO_IA: "!ia",
+  PREFIJO_COMANDO_PRUEBA: "!pruebavoz",
+  PREFIJO_COMANDO_NARUTO: "!naruto",
 
   // Comportamiento
   COOLDOWN_SEGUNDOS: numeroEntero("COOLDOWN_SEGUNDOS", 10, 0, 3600),
   SOLO_SUBS: process.env.SOLO_SUBS === "true",
   MAX_CARACTERES: numeroEntero("MAX_CARACTERES", 150, 1, 500),
   MAX_COLA: numeroEntero("MAX_COLA", 20, 1, 100),
+  CHAT_MAX_NAME: numeroEntero("CHAT_MAX_NAME", 30, 1, 60),
+  CHAT_COOLDOWN_SEGUNDOS: numeroEntero("CHAT_COOLDOWN_SEGUNDOS", 5, 0, 3600),
+  CHAT_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "CHAT_GLOBAL_COOLDOWN_SEGUNDOS",
+    1,
+    0,
+    60,
+  ),
+  CHAT_LIMITE_DIARIO: numeroEntero("CHAT_LIMITE_DIARIO", 200, 1, 100_000),
+  CHAT_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "CHAT_LIMITE_USUARIO_DIARIO",
+    50,
+    1,
+    10_000,
+  ),
 
   // Voz
   TTS_PROVIDER: proveedorValido,
@@ -72,6 +99,12 @@ const CONFIG = {
     25_000,
     5_000,
     60_000,
+  ),
+  TTS_JOB_TIMEOUT_MS: numeroEntero(
+    "TTS_JOB_TIMEOUT_MS",
+    45_000,
+    10_000,
+    180_000,
   ),
   TTS_RETRIES: numeroEntero("TTS_RETRIES", 2, 1, 4),
   TTS_RATE: numeroDecimal("TTS_RATE", 1.05, 0.5, 2),
@@ -83,6 +116,100 @@ const CONFIG = {
   GEMINI_TTS_STYLE:
     process.env.GEMINI_TTS_STYLE ||
     "cheerful, warm, spontaneous and natural Colombian woman from the Caribbean coast, with a subtle costeño accent, expressive conversational intonation, a lively medium pace and clear diction; sound human rather than robotic or like an announcer, and never caricature or exaggerate the accent",
+  GEMINI_COAST_VOICE: process.env.GEMINI_COAST_VOICE || "Kore",
+  GEMINI_COAST_STYLE:
+    process.env.GEMINI_COAST_STYLE ||
+    "an unmistakably feminine adult Colombian woman from Barranquilla, with a warm medium-low contralto register that never sounds masculine, confident and assertive yet playful, a slightly husky natural texture, quick conversational cadence, crisp articulation, expressive pitch movement and a subtle Caribbean Colombian accent; use natural pauses, never sound like an announcer, never caricature the accent, and never imitate or claim to be a real person",
+
+  // Fish Audio (voz comunitaria; la atribucion se envia al dashboard)
+  FISH_API_KEY: process.env.FISH_API_KEY || null,
+  FISH_REFERENCE_ID:
+    process.env.FISH_REFERENCE_ID || "c23b3ac076b44c07918ed2c54addc2c5",
+  FISH_TTS_MODEL: process.env.FISH_TTS_MODEL || "s2.1-pro-free",
+  FISH_TTS_ENDPOINT: process.env.FISH_TTS_ENDPOINT || "https://api.fish.audio/v1/tts",
+  FISH_ATTRIBUTION:
+    process.env.FISH_ATTRIBUTION ||
+    "Voz IA no oficial inspirada en Diomedes Díaz · Fish Audio · modelo de saibormigue 369",
+  FISH_NARUTO_REFERENCE_ID:
+    process.env.FISH_NARUTO_REFERENCE_ID || "1412b58e859448d284f8f62391e82bd9",
+  FISH_NARUTO_ATTRIBUTION:
+    process.env.FISH_NARUTO_ATTRIBUTION ||
+    "Voz IA no oficial inspirada en Naruto · Fish Audio · modelo de coach_frank1994",
+  FISH_CACHE_TTL_MS: numeroEntero(
+    "FISH_CACHE_TTL_MS",
+    60 * 60 * 1000,
+    0,
+    24 * 60 * 60 * 1000,
+  ),
+  FISH_CACHE_MAX: numeroEntero("FISH_CACHE_MAX", 30, 0, 100),
+
+  // Respuestas de !ia
+  AI_MODEL: process.env.AI_MODEL || "gemini-3.5-flash-lite",
+  AI_MAX_PREGUNTA: numeroEntero("AI_MAX_PREGUNTA", 220, 20, 500),
+  AI_MAX_RESPUESTA: numeroEntero("AI_MAX_RESPUESTA", 280, 80, 500),
+  AI_TIMEOUT_MS: numeroEntero("AI_TIMEOUT_MS", 20_000, 5_000, 60_000),
+  AI_RETRIES: numeroEntero("AI_RETRIES", 2, 1, 4),
+  AI_CACHE_TTL_MS: numeroEntero(
+    "AI_CACHE_TTL_MS",
+    30 * 60 * 1000,
+    0,
+    24 * 60 * 60 * 1000,
+  ),
+  AI_CACHE_MAX: numeroEntero("AI_CACHE_MAX", 100, 0, 500),
+  // Presupuesto y proteccion antiabuso para comandos costosos
+  FISH_COOLDOWN_SEGUNDOS: numeroEntero("FISH_COOLDOWN_SEGUNDOS", 45, 0, 3600),
+  FISH_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "FISH_GLOBAL_COOLDOWN_SEGUNDOS",
+    3,
+    0,
+    60,
+  ),
+  FISH_LIMITE_DIARIO: numeroEntero("FISH_LIMITE_DIARIO", 60, 1, 100_000),
+  FISH_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "FISH_LIMITE_USUARIO_DIARIO",
+    6,
+    1,
+    10_000,
+  ),
+  GEMINI_TTS_COOLDOWN_SEGUNDOS: numeroEntero(
+    "GEMINI_TTS_COOLDOWN_SEGUNDOS",
+    60,
+    0,
+    3600,
+  ),
+  GEMINI_TTS_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "GEMINI_TTS_GLOBAL_COOLDOWN_SEGUNDOS",
+    22,
+    0,
+    60,
+  ),
+  GEMINI_TTS_LIMITE_DIARIO: numeroEntero(
+    "GEMINI_TTS_LIMITE_DIARIO",
+    9,
+    1,
+    100_000,
+  ),
+  GEMINI_TTS_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "GEMINI_TTS_LIMITE_USUARIO_DIARIO",
+    2,
+    1,
+    10_000,
+  ),
+  AI_COOLDOWN_SEGUNDOS: numeroEntero("AI_COOLDOWN_SEGUNDOS", 60, 0, 3600),
+  AI_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "AI_GLOBAL_COOLDOWN_SEGUNDOS",
+    4,
+    0,
+    60,
+  ),
+  AI_LIMITE_DIARIO: numeroEntero("AI_LIMITE_DIARIO", 60, 1, 100_000),
+  AI_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "AI_LIMITE_USUARIO_DIARIO",
+    5,
+    1,
+    10_000,
+  ),
+  USAGE_TIMEZONE: process.env.USAGE_TIMEZONE || "America/Bogota",
 };
 
 function validate() {
@@ -101,15 +228,26 @@ function validate() {
     );
   }
 
+  if (CONFIG.TTS_PROVIDER === "fish" && !CONFIG.FISH_API_KEY) {
+    log.warn(
+      "TTS_PROVIDER=fish sin FISH_API_KEY; se usara Gemini o Google como respaldo",
+    );
+  }
+
   const proveedorEfectivo =
-    CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
-      ? "google"
-      : "gemini";
+    CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY
+      ? "fish"
+      : CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
+        ? "google"
+        : "gemini";
 
   log.info(`Canal: #${CONFIG.CANAL} | Puerto: ${CONFIG.PUERTO}`);
   log.info(
-    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""}`,
+    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""} | !habla Gemini: ${CONFIG.GEMINI_COAST_VOICE} | Fish: ${CONFIG.FISH_API_KEY ? "configurado" : "sin API key"}`,
   );
+  if (!CONFIG.CHAT_TOKEN) {
+    log.warn("CHAT_TOKEN no configurado; /chat quedara abierto con limites antiabuso");
+  }
 }
 
 module.exports = { ...CONFIG, validate };

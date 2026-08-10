@@ -18,10 +18,18 @@ test("la cola mantiene estado en memoria y persiste atomically", () => {
   assert.equal(cola.obtenerPrimero().estado, "generando");
 
   assert.equal(
+    cola.actualizarMensaje(entrada.id, "hola corregido", {
+      pregunta: "ola corregido",
+    }),
+    true,
+  );
+
+  assert.equal(
     cola.actualizarAudio(entrada.id, {
       rutaAudio: "audio.wav",
       mimeType: "audio/wav",
       provider: "gemini",
+      attribution: "Voz Gemini · Aoede",
     }),
     true,
   );
@@ -30,8 +38,14 @@ test("la cola mantiene estado en memoria y persiste atomically", () => {
       estado: cola.buscar(entrada.id).estado,
       mime: cola.buscar(entrada.id).audioMime,
       provider: cola.buscar(entrada.id).proveedorTts,
+      atribucion: cola.buscar(entrada.id).atribucion,
     },
-    { estado: "listo", mime: "audio/wav", provider: "gemini" },
+    {
+      estado: "listo",
+      mime: "audio/wav",
+      provider: "gemini",
+      atribucion: "Voz Gemini · Aoede",
+    },
   );
   assert.equal(JSON.parse(fs.readFileSync(archivo, "utf8")).length, 1);
   assert.equal(cola.eliminar(entrada.id).id, entrada.id);
@@ -48,5 +62,28 @@ test("un TTS fallido queda listo para fallback y no bloquea", () => {
   assert.equal(cola.marcarFallback(entrada.id, "timeout"), true);
   assert.equal(cola.obtenerPrimero().estado, "listo");
   assert.equal(cola.obtenerPrimero().fallbackNavegador, true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("un fallo de persistencia no bloquea la cola en memoria", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ttsbot-queue-"));
+  const destinoInvalido = path.join(dir, "queue.json");
+  fs.mkdirSync(destinoInvalido);
+  const avisos = [];
+  const cola = crearCola(destinoInvalido, {
+    ...logger,
+    warn: (...args) => avisos.push(args.join(" ")),
+  });
+
+  cola.inicializar();
+  const entrada = cola.agregar({ usuario: "ana", mensaje: "hola" });
+  assert.equal(cola.total(), 1);
+  assert.equal(
+    cola.actualizarAudio(entrada.id, { rutaAudio: "audio.mp3" }),
+    true,
+  );
+  assert.equal(cola.obtenerPrimero().estado, "listo");
+  assert.ok(avisos.some((aviso) => /conserva en memoria/i.test(aviso)));
+
   fs.rmSync(dir, { recursive: true, force: true });
 });

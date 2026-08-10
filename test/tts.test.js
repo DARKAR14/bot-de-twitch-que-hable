@@ -27,3 +27,54 @@ test("un trabajo eliminado de la cola se cancela antes de consumir TTS", () => {
   );
   assert.doesNotThrow(() => _internals.verificarContinuacion(() => true));
 });
+
+test("Fish recibe un payload estable con proteccion contra repeticiones", () => {
+  const payload = _internals.crearPayloadFish("hola, mi gente");
+  assert.equal(payload.text, "hola, mi gente");
+  assert.equal(payload.format, "mp3");
+  assert.equal(payload.repetition_penalty, 1.2);
+  assert.equal(payload.condition_on_previous_chunks, true);
+  assert.match(payload.reference_id, /^[a-f0-9]{32}$/);
+  assert.equal(
+    _internals.crearPayloadFish(
+      "hola",
+      "1412b58e859448d284f8f62391e82bd9",
+    ).reference_id,
+    "1412b58e859448d284f8f62391e82bd9",
+  );
+});
+
+test("la cadena balanceada prueba ambas voces antes de Google", () => {
+  assert.deepEqual(_internals.crearOrdenProveedores("balanced"), [
+    "fish",
+    "gemini",
+    "google",
+  ]);
+  assert.deepEqual(
+    _internals.crearOrdenProveedores("auto", ["gemini", "fish"]),
+    ["gemini", "fish", "google"],
+  );
+});
+
+test("un aborto interrumpe inmediatamente la espera entre reintentos", async () => {
+  const controlador = new AbortController();
+  let intentos = 0;
+  const fallo = new Error("fallo temporal");
+  fallo.retryable = true;
+  const cancelado = new Error("trabajo cancelado");
+  cancelado.code = "TTS_CANCELLED";
+  cancelado.retryable = false;
+
+  const trabajo = _internals.conRetry(
+    async () => {
+      intentos += 1;
+      throw fallo;
+    },
+    4,
+    controlador.signal,
+  );
+  setTimeout(() => controlador.abort(cancelado), 20);
+
+  await assert.rejects(trabajo, (err) => err === cancelado);
+  assert.equal(intentos, 1);
+});

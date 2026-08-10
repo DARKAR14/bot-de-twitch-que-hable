@@ -16,6 +16,8 @@ const ws = require("./src/websocket");
 const playback = require("./src/playback");
 const twitch = require("./src/twitch");
 const tts = require("./src/tts");
+const ai = require("./src/ai");
+const usage = require("./src/usage");
 
 CONFIG.validate();
 queue.inicializar({ limpiarAlArrancar: true });
@@ -30,6 +32,7 @@ let cerrando = false;
 log.info(`Arrancando instancia ${INSTANCE_ID}`);
 
 app.disable("x-powered-by");
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "16kb" }));
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -38,7 +41,10 @@ app.use((req, res, next) => {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Admin-Token, X-Chat-Token",
+  );
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -53,8 +59,12 @@ const apiConfig = {
   voiceRate: CONFIG.TTS_RATE,
   voicePitch: CONFIG.TTS_PITCH,
   ttsProvider:
-    CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY ? "google" : "gemini",
-  ttsVoice: CONFIG.GEMINI_API_KEY ? CONFIG.GEMINI_TTS_VOICE : null,
+    CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY
+      ? "fish"
+      : CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
+        ? "google"
+        : "gemini",
+  ttsVoice: CONFIG.GEMINI_API_KEY ? CONFIG.GEMINI_COAST_VOICE : null,
 };
 
 function colaPublica() {
@@ -74,6 +84,53 @@ function validarColor(valor) {
 app.get("/", (req, res) => {
   res.setHeader("ngrok-skip-browser-warning", "true");
   res.sendFile(path.join(__dirname, "obs.html"));
+});
+
+app.get("/chat", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "chat.html"));
+});
+
+app.get("/api/chat/config", (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    authRequired: Boolean(CONFIG.CHAT_TOKEN),
+    maxName: CONFIG.CHAT_MAX_NAME,
+    maxMessage: CONFIG.MAX_CARACTERES,
+    cooldownSeconds: CONFIG.CHAT_COOLDOWN_SEGUNDOS,
+    voices: twitch.vocesWeb(),
+  });
+});
+
+function tokenChatValido(req) {
+  if (!CONFIG.CHAT_TOKEN) return true;
+  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  return (
+    bearer === CONFIG.CHAT_TOKEN ||
+    req.headers["x-chat-token"] === CONFIG.CHAT_TOKEN
+  );
+}
+
+app.post("/api/chat", (req, res) => {
+  if (!tokenChatValido(req)) {
+    return res.status(401).json({
+      ok: false,
+      code: "UNAUTHORIZED",
+      error: "Token del chat incorrecto.",
+    });
+  }
+
+  const resultado = twitch.encolarDesdeWeb({
+    name: req.body?.name,
+    message: req.body?.message,
+    voice: req.body?.voice,
+    clientKey: req.ip,
+  });
+  const { status, ...body } = resultado;
+  if (resultado.retryAfter) {
+    res.setHeader("Retry-After", String(resultado.retryAfter));
+  }
+  return res.status(status || 500).json(body);
 });
 
 app.get("/config", (req, res) => res.sendFile(path.join(__dirname, "config.html")));
@@ -96,7 +153,14 @@ app.get("/stats", (req, res) => {
     cola: queue.stats(),
     playback: playback.estado(),
     websocket: ws.estadisticas(),
-    tts: { provider: apiConfig.ttsProvider, voice: apiConfig.ttsVoice },
+    tts: {
+      provider: apiConfig.ttsProvider,
+      voice: apiConfig.ttsVoice,
+      fishConfigurado: Boolean(CONFIG.FISH_API_KEY && CONFIG.FISH_REFERENCE_ID),
+      ...tts.stats(),
+    },
+    ia: ai.stats(),
+    consumo: usage.resumen(),
   });
 });
 

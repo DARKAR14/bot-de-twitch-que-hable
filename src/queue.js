@@ -16,10 +16,21 @@ function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
   let inicializada = false;
 
   function persistir() {
-    const dir = path.dirname(queueFile);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(tempFile, JSON.stringify(items, null, 2), "utf8");
-    fs.renameSync(tempFile, queueFile);
+    try {
+      const dir = path.dirname(queueFile);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(tempFile, JSON.stringify(items, null, 2), "utf8");
+      fs.renameSync(tempFile, queueFile);
+      return true;
+    } catch (err) {
+      // La cola en memoria sigue siendo la fuente operativa. Un fallo temporal
+      // del disco no debe dejar una entrada a medio agregar y bloquear el FIFO.
+      logger.warn("No se pudo persistir la cola; se conserva en memoria", err.message);
+      try {
+        fs.rmSync(tempFile, { force: true });
+      } catch {}
+      return false;
+    }
   }
 
   function inicializar({ limpiarAlArrancar = true } = {}) {
@@ -62,6 +73,11 @@ function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
       usuario: entrada.usuario,
       mensaje: entrada.mensaje,
       idioma: entrada.idioma || "es",
+      tipo: entrada.tipo || "tts",
+      origen: entrada.origen || "twitch",
+      vozSeleccionada: entrada.vozSeleccionada || null,
+      pregunta: entrada.pregunta || null,
+      atribucion: entrada.atribucion || null,
       estado: "generando",
       timestamp: new Date().toISOString(),
     };
@@ -78,8 +94,21 @@ function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
     entrada.rutaAudio = audio.rutaAudio;
     entrada.audioMime = audio.mimeType || "audio/mpeg";
     entrada.proveedorTts = audio.provider || "google";
+    entrada.atribucion = audio.attribution || entrada.atribucion || null;
     entrada.estado = "listo";
+    delete entrada.fallbackNavegador;
     delete entrada.errorTts;
+    persistir();
+    return true;
+  }
+
+  function actualizarMensaje(id, mensaje, { pregunta, atribucion } = {}) {
+    asegurarInicializada();
+    const entrada = items.find((item) => item.id === id);
+    if (!entrada) return false;
+    entrada.mensaje = String(mensaje || "").trim();
+    if (pregunta !== undefined) entrada.pregunta = pregunta;
+    if (atribucion !== undefined) entrada.atribucion = atribucion;
     persistir();
     return true;
   }
@@ -90,6 +119,8 @@ function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
     if (!entrada) return false;
     entrada.estado = "listo";
     entrada.fallbackNavegador = true;
+    entrada.proveedorTts = "navegador";
+    entrada.atribucion = "Voz de respaldo del navegador";
     entrada.errorTts = String(error || "TTS no disponible").slice(0, 200);
     persistir();
     return true;
@@ -155,6 +186,7 @@ function crearCola(queueFile = DEFAULT_QUEUE_FILE, logger = log) {
     inicializar,
     agregar,
     actualizarAudio,
+    actualizarMensaje,
     marcarFallback,
     buscar,
     obtenerPrimero,

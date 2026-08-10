@@ -1,13 +1,13 @@
 {
   "name": "ttsbot",
   "version": "1.0.0",
-  "description": "Bot TTS para Twitch con overlay OBS, cola local y Gemini TTS opcional",
+  "description": "Bot TTS para Twitch con OBS, Gemini, Fish Audio y respuestas IA",
   "main": "bot.js",
   "scripts": {
     "dev": "nodemon bot.js",
     "start": "node bot.js",
     "test": "node --test",
-    "check": "node --check bot.js && node --check src/config.js && node --check src/logger.js && node --check src/playback.js && node --check src/queue.js && node --check src/tts.js && node --check src/twitch.js && node --check src/websocket.js"
+    "check": "node --check bot.js && node --check src/ai.js && node --check src/config.js && node --check src/logger.js && node --check src/playback.js && node --check src/queue.js && node --check src/tts.js && node --check src/twitch.js && node --check src/usage.js && node --check src/websocket.js"
   },
   "keywords": [],
   "author": "",
