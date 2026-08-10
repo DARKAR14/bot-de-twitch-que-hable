@@ -183,6 +183,32 @@ const CONFIG = {
     24 * 60 * 60 * 1000,
   ),
   AI_CACHE_MAX: numeroEntero("AI_CACHE_MAX", 100, 0, 500),
+  // Correccion opcional del texto que se envia al sintetizador. El mensaje
+  // original permanece visible en OBS y se usa si Gemini falla o no tiene cuota.
+  TTS_TEXT_CORRECTION_ENABLED:
+    process.env.TTS_TEXT_CORRECTION_ENABLED !== "false",
+  TTS_TEXT_CORRECTION_MODEL:
+    process.env.TTS_TEXT_CORRECTION_MODEL ||
+    process.env.AI_MODEL ||
+    "gemini-3.5-flash-lite",
+  TTS_TEXT_CORRECTION_TIMEOUT_MS: numeroEntero(
+    "TTS_TEXT_CORRECTION_TIMEOUT_MS",
+    6_000,
+    1_000,
+    20_000,
+  ),
+  TTS_TEXT_CORRECTION_CACHE_TTL_MS: numeroEntero(
+    "TTS_TEXT_CORRECTION_CACHE_TTL_MS",
+    6 * 60 * 60 * 1000,
+    0,
+    24 * 60 * 60 * 1000,
+  ),
+  TTS_TEXT_CORRECTION_CACHE_MAX: numeroEntero(
+    "TTS_TEXT_CORRECTION_CACHE_MAX",
+    300,
+    0,
+    2_000,
+  ),
   // Presupuesto y proteccion antiabuso para comandos costosos
   FISH_COOLDOWN_SEGUNDOS: numeroEntero("FISH_COOLDOWN_SEGUNDOS", 45, 0, 3600),
   FISH_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
@@ -257,6 +283,24 @@ const CONFIG = {
   AI_LIMITE_USUARIO_DIARIO: numeroEntero(
     "AI_LIMITE_USUARIO_DIARIO",
     5,
+    1,
+    10_000,
+  ),
+  TTS_TEXT_CORRECTION_GLOBAL_COOLDOWN_SEGUNDOS: numeroDecimal(
+    "TTS_TEXT_CORRECTION_GLOBAL_COOLDOWN_SEGUNDOS",
+    1,
+    0,
+    60,
+  ),
+  TTS_TEXT_CORRECTION_LIMITE_DIARIO: numeroEntero(
+    "TTS_TEXT_CORRECTION_LIMITE_DIARIO",
+    150,
+    1,
+    100_000,
+  ),
+  TTS_TEXT_CORRECTION_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "TTS_TEXT_CORRECTION_LIMITE_USUARIO_DIARIO",
+    25,
     1,
     10_000,
   ),

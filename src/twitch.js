@@ -246,6 +246,15 @@ function reglaUso(tipo) {
       limiteUsuario: CONFIG.CHAT_LIMITE_USUARIO_DIARIO,
     };
   }
+  if (tipo === "tts_text_correction") {
+    return {
+      tipo,
+      globalCooldownMs:
+        CONFIG.TTS_TEXT_CORRECTION_GLOBAL_COOLDOWN_SEGUNDOS * 1000,
+      limiteDiario: CONFIG.TTS_TEXT_CORRECTION_LIMITE_DIARIO,
+      limiteUsuario: CONFIG.TTS_TEXT_CORRECTION_LIMITE_USUARIO_DIARIO,
+    };
+  }
   return {
     tipo: "ai",
     cooldownMs: CONFIG.AI_COOLDOWN_SEGUNDOS * 1000,
@@ -292,11 +301,36 @@ function textoRechazoUso(resultado, usuario) {
 }
 
 function iniciarGeneracionTts(entrada, texto, idioma, opciones = {}) {
-  tts
-    .generarAudio(texto, idioma, {
+  const {
+    corregirTexto = true,
+    puedeCorregirTexto = () => true,
+    ...opcionesTts
+  } = opciones;
+  Promise.resolve()
+    .then(async () => {
+      let textoVoz = texto;
+      if (
+        corregirTexto &&
+        CONFIG.TTS_TEXT_CORRECTION_ENABLED &&
+        CONFIG.GEMINI_API_KEY &&
+        puedeCorregirTexto()
+      ) {
+        const resultado = await ai.corregirTextoParaVoz(texto, { idioma });
+        textoVoz = resultado.texto || texto;
+        if (resultado.corregido) {
+          log.info(`Texto corregido para la voz de ${entrada.usuario}${resultado.cache ? " (cache)" : ""}`);
+        }
+      }
+      if (!queue.buscar(entrada.id)) {
+        const error = new Error("TTS cancelado antes de iniciar");
+        error.code = "TTS_CANCELLED";
+        throw error;
+      }
+      return tts.generarAudio(textoVoz, idioma, {
       id: entrada.id,
       debeContinuar: () => Boolean(queue.buscar(entrada.id)),
-      ...opciones,
+        ...opcionesTts,
+      });
     })
     .then((resultado) => {
       const attribution = entrada.tipo === "ia"
@@ -337,6 +371,7 @@ async function procesarIa({
     );
     const usarFish = modoVoz === "fish" || modoVoz === "naruto";
     iniciarGeneracionTts(entrada, narracion, "es", {
+      corregirTexto: false,
       providerOrder: usarFish
         ? ["fish", "gemini", "puter", "google"]
         : ["gemini", "fish", "puter", "google"],
@@ -481,6 +516,10 @@ function encolarDesdeWeb(
     `💬 /chat | ${usuario}: "${texto}" | voz: ${perfil.id} | preferida: ${perfil.providerOrder[0]}`,
   );
   generarTts(entrada, texto, "es", {
+    puedeCorregirTexto: () => usoServicio.reservarVarios(
+      [reglaUso("tts_text_correction")],
+      { usuario: claveUsuario },
+    ).ok,
     provider: perfil.provider,
     providerOrder: perfil.providerOrder,
     puedeUsarProveedor: crearControl(
@@ -683,6 +722,10 @@ async function manejarMensaje(channel, tags, message, self) {
     `${comando.flag} ${comando.prefijo} | ${usuario}: "${texto}"${providerOrder ? ` | preferida: ${providerOrder[0]}` : ""}`,
   );
   iniciarGeneracionTts(entrada, texto, comando.idioma, {
+    puedeCorregirTexto: () => usage.reservarVarios(
+      [reglaUso("tts_text_correction")],
+      { usuario: claveUsuario, bypassUsuario: esMod },
+    ).ok,
     provider: comando.provider || "auto",
     providerOrder,
     puedeUsarProveedor: crearControlProveedor(

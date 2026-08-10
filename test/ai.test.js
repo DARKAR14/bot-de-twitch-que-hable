@@ -6,6 +6,17 @@ test("la cache de IA normaliza mayusculas, tildes y puntuacion", () => {
   assert.equal(_internals.normalizarClave("¿HÓLA, cómo estás!!!"), "hola como estas");
 });
 
+test("la cache del corrector no mezcla palabras que cambian por la tilde", () => {
+  assert.notEqual(
+    _internals.normalizarClaveCorreccion("si, señor"),
+    _internals.normalizarClaveCorreccion("sí, señor"),
+  );
+  assert.equal(
+    _internals.normalizarClaveCorreccion("hola   mundo"),
+    "hola mundo",
+  );
+});
+
 test("la respuesta se limpia y nunca supera el maximo", () => {
   const respuesta = _internals.limitarRespuesta(
     "**Primera frase correcta.** Segunda frase demasiado larga para una alerta de stream.",
@@ -27,4 +38,19 @@ test("!ia naruto usa una personalidad anime original sin suplantar al personaje"
   assert.match(prompt, /joven ninja/i);
   assert.match(prompt, /No afirmes ser Naruto/i);
   assert.match(prompt, /no repitas frases distintivas/i);
+});
+
+test("el corrector prepara pronunciacion sin inventar ni censurar", () => {
+  const prompt = _internals.promptCorreccion("es");
+  assert.match(prompt, /ortografía, tildes, puntuación/i);
+  assert.match(prompt, /Conserva exactamente el significado/i);
+  assert.match(prompt, /No censures, traduzcas, respondas ni agregues/i);
+  assert.match(prompt, /costeño colombiano natural/i);
+});
+
+test("la salida del corrector elimina envolturas pero conserva el contenido", () => {
+  assert.equal(
+    _internals.limpiarCorreccion('Texto corregido: “¿Cómo están, mi gente?”', "como estan mi gente"),
+    "¿Cómo están, mi gente?",
+  );
 });

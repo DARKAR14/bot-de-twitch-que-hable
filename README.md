@@ -10,6 +10,7 @@ Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordena
 - Cola local en memoria con escritura atomica a `data/queue.json`.
 - `!habla` alterna entre Gemini TTS y Fish Audio, prueba Puter y deja Google como respaldo final.
 - `!ia` responde preguntas breves, interpreta errores ortograficos y habla la respuesta.
+- Los mensajes normales se corrigen antes de generar el audio (tildes, puntuacion y abreviaturas), pero OBS conserva el texto original. Si el corrector falla o alcanza su limite, la cola sigue con el mensaje original.
 - Perfil Naruto independiente para `!naruto` y `!ia naruto`.
 - Chat privado en `/chat` para enviar TTS a OBS sin escribir en Twitch.
 - Limites diarios persistentes, enfriamiento por usuario, control de rafagas y cache.
