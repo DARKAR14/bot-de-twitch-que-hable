@@ -21,6 +21,7 @@ const cacheFish = new Map();
 let fishBloqueadoHasta = 0;
 let geminiBloqueadoHasta = 0;
 let puterBloqueadoHasta = 0;
+let huggingFaceBloqueadoHasta = 0;
 
 function inicializar() {
   fs.mkdirSync(AUDIO_DIR, { recursive: true });
@@ -645,21 +646,104 @@ async function generarPuter(
   }
 }
 
+function crearPayloadHuggingFace(texto) {
+  return { inputs: texto, options: { wait_for_model: true } };
+}
+
+async function generarHuggingFace(
+  texto,
+  id,
+  debeContinuar,
+  puedeUsarProveedor,
+  signal,
+) {
+  verificarSenal(signal);
+  if (!CONFIG.HUGGINGFACE_TTS_ENDPOINT) {
+    throw new Error("HUGGINGFACE_TTS_ENDPOINT no configurado");
+  }
+  if (Date.now() < huggingFaceBloqueadoHasta) {
+    const error = new Error("Hugging Face está descansando temporalmente");
+    error.code = "HUGGINGFACE_TTS_CIRCUIT_OPEN";
+    error.retryable = false;
+    throw error;
+  }
+  if (
+    typeof puedeUsarProveedor === "function" &&
+    !(await puedeUsarProveedor("huggingface"))
+  ) {
+    throw errorProveedorOmitido("huggingface");
+  }
+
+  const body = JSON.stringify(crearPayloadHuggingFace(texto));
+  const headers = {
+    Accept: "audio/mpeg, audio/wav, audio/ogg, application/octet-stream",
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(body),
+  };
+  if (CONFIG.HUGGINGFACE_TOKEN) {
+    headers.Authorization = `Bearer ${CONFIG.HUGGINGFACE_TOKEN}`;
+  }
+
+  try {
+    const resultado = await conRetry(
+      () => peticionBuffer(CONFIG.HUGGINGFACE_TTS_ENDPOINT, {
+        method: "POST",
+        headers,
+        body,
+        signal,
+      }),
+      CONFIG.TTS_RETRIES,
+      signal,
+    );
+    verificarSenal(signal);
+    verificarContinuacion(debeContinuar);
+    const mimeType = String(resultado.headers["content-type"] || "audio/mpeg")
+      .split(";", 1)[0]
+      .trim();
+    if (!mimeType.startsWith("audio/") && mimeType !== "application/octet-stream") {
+      const detalle = resultado.buffer.toString("utf8").slice(0, 200);
+      const error = new Error(`Hugging Face no devolvió audio: ${detalle}`);
+      error.retryable = false;
+      throw error;
+    }
+    const mimeSeguro = mimeType === "application/octet-stream" ? "audio/mpeg" : mimeType;
+    const extension = extensionAudio(mimeSeguro);
+    const rutaAudio = path.join(AUDIO_DIR, `tts_${nombreSeguro(id)}.${extension}`);
+    escribirAtomico(rutaAudio, resultado.buffer);
+    return {
+      rutaAudio,
+      mimeType: mimeSeguro,
+      provider: "huggingface",
+      attribution: CONFIG.HUGGINGFACE_TTS_ATTRIBUTION,
+    };
+  } catch (error) {
+    if (error.statusCode === 429) {
+      huggingFaceBloqueadoHasta =
+        Date.now() + Math.max(error.retryAfterMs || 0, 5 * 60 * 1000);
+    } else if (error.statusCode === 401 || error.statusCode === 403) {
+      huggingFaceBloqueadoHasta = Date.now() + 60 * 60 * 1000;
+    }
+    throw error;
+  }
+}
+
 function crearOrdenProveedores(provider = "auto", providerOrder) {
-  const validos = new Set(["fish", "gemini", "puter", "google"]);
+  const validos = new Set(["fish", "gemini", "puter", "huggingface", "google"]);
   let orden;
   if (Array.isArray(providerOrder) && providerOrder.length > 0) {
     orden = providerOrder;
   } else {
     const efectivo = provider === "auto" ? CONFIG.TTS_PROVIDER : provider;
     if (efectivo === "fish" || efectivo === "balanced") {
-      orden = ["fish", "gemini", "puter", "google"];
+      orden = ["gemini", "puter", "huggingface", "google"];
     } else if (efectivo === "puter") {
-      orden = ["puter", "google"];
+      orden = ["puter", "huggingface", "google"];
+    } else if (efectivo === "huggingface") {
+      orden = ["huggingface", "google"];
     } else if (efectivo === "google") {
       orden = ["google"];
     } else {
-      orden = ["gemini", "puter", "google"];
+      orden = ["gemini", "puter", "huggingface", "google"];
     }
   }
 
@@ -805,6 +889,29 @@ async function generarAudio(
           continue;
         }
 
+        if (proveedor === "huggingface") {
+          if (!CONFIG.HUGGINGFACE_TTS_ENDPOINT) continue;
+          try {
+            log.info(`Generando voz Hugging Face para ${id || "mensaje"}`);
+            return await generarHuggingFace(
+              texto,
+              id,
+              debeContinuar,
+              puedeUsarProveedor,
+              signal,
+            );
+          } catch (err) {
+            if (signal.aborted) throw errorDesdeSenal(signal);
+            if (err.code === "TTS_CANCELLED") throw err;
+            if (err.code === "TTS_PROVIDER_SKIPPED") {
+              log.debug("Hugging Face omitido por presupuesto o cooldown");
+            } else {
+              log.warn("Hugging Face TTS falló; usando otro proveedor", err.message);
+            }
+          }
+          continue;
+        }
+
         log.info(`Generando voz Google (${idioma}) para ${id || "mensaje"}`);
         return generarGoogle(texto, idioma, id, debeContinuar, signal);
       }
@@ -868,6 +975,10 @@ function stats() {
       0,
       Math.ceil((puterBloqueadoHasta - Date.now()) / 1000),
     ),
+    circuitoHuggingFaceAbiertoSegundos: Math.max(
+      0,
+      Math.ceil((huggingFaceBloqueadoHasta - Date.now()) / 1000),
+    ),
   };
 }
 
@@ -887,6 +998,7 @@ module.exports = {
     conRetry,
     verificarContinuacion,
     crearPayloadFish,
+    crearPayloadHuggingFace,
     crearOrdenProveedores,
   },
 };

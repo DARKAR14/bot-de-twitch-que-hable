@@ -20,7 +20,13 @@ function numeroDecimal(nombre, fallback, minimo, maximo) {
 }
 
 const proveedorSolicitado = (process.env.TTS_PROVIDER || "auto").toLowerCase();
-const proveedorValido = ["auto", "fish", "gemini", "puter", "google"].includes(
+const proveedorValido = [
+  "auto",
+  "gemini",
+  "puter",
+  "huggingface",
+  "google",
+].includes(
   proveedorSolicitado,
 )
   ? proveedorSolicitado
@@ -50,9 +56,17 @@ const CONFIG = {
   APP_URL: process.env.APP_URL || null,
   DASHBOARD_ORIGIN:
     process.env.DASHBOARD_ORIGIN || "https://darkops-dasboard.netlify.app",
+  DASHBOARD_CHAT_URL: process.env.DASHBOARD_CHAT_URL || null,
   ADMIN_TOKEN: process.env.ADMIN_TOKEN || null,
   WS_TOKEN: process.env.WS_TOKEN || null,
-  CHAT_TOKEN: process.env.CHAT_TOKEN || null,
+  PANEL_API_TOKEN: process.env.PANEL_API_TOKEN || process.env.CHAT_TOKEN || null,
+  PANEL_IDEMPOTENCY_TTL_HOURS: numeroEntero(
+    "PANEL_IDEMPOTENCY_TTL_HOURS",
+    24,
+    1,
+    168,
+  ),
+  PANEL_IDEMPOTENCY_MAX: numeroEntero("PANEL_IDEMPOTENCY_MAX", 5000, 100, 50_000),
   WS_MAX_PAYLOAD: numeroEntero("WS_MAX_PAYLOAD", 64 * 1024, 1024, 1024 * 1024),
   PLAYBACK_TIMEOUT_MS: numeroEntero(
     "PLAYBACK_TIMEOUT_MS",
@@ -81,7 +95,6 @@ const CONFIG = {
   PREFIJO_COMANDO_PT: "!cr7",
   PREFIJO_COMANDO_IA: "!ia",
   PREFIJO_COMANDO_PRUEBA: "!pruebavoz",
-  PREFIJO_COMANDO_NARUTO: "!naruto",
 
   // Comportamiento
   COOLDOWN_SEGUNDOS: numeroEntero("COOLDOWN_SEGUNDOS", 10, 0, 3600),
@@ -103,6 +116,13 @@ const CONFIG = {
     1,
     10_000,
   ),
+  ALERTA_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "ALERTA_GLOBAL_COOLDOWN_SEGUNDOS",
+    5,
+    0,
+    60,
+  ),
+  ALERTA_BITS_MINIMOS: numeroEntero("ALERTA_BITS_MINIMOS", 100, 1, 100_000),
 
   // Voz
   TTS_PROVIDER: proveedorValido,
@@ -147,6 +167,13 @@ const CONFIG = {
   PUTER_TTS_FORMAT: process.env.PUTER_TTS_FORMAT || "mp3",
   PUTER_TTS_ENGINE: process.env.PUTER_TTS_ENGINE || "neural",
   PUTER_TTS_ATTRIBUTION: process.env.PUTER_TTS_ATTRIBUTION || null,
+
+  // Hugging Face: endpoint TTS propio o dedicado con contrato { inputs: texto }.
+  // No se activa solo con un token porque Fish S1 no tiene inferencia serverless.
+  HUGGINGFACE_TOKEN: process.env.HUGGINGFACE_TOKEN || null,
+  HUGGINGFACE_TTS_ENDPOINT: process.env.HUGGINGFACE_TTS_ENDPOINT || null,
+  HUGGINGFACE_TTS_ATTRIBUTION:
+    process.env.HUGGINGFACE_TTS_ATTRIBUTION || "Voz de respaldo · Hugging Face",
 
   // Fish Audio (voz comunitaria; la atribucion se envia al dashboard)
   FISH_API_KEY: process.env.FISH_API_KEY || null,
@@ -272,6 +299,30 @@ const CONFIG = {
     1,
     10_000,
   ),
+  HUGGINGFACE_TTS_COOLDOWN_SEGUNDOS: numeroEntero(
+    "HUGGINGFACE_TTS_COOLDOWN_SEGUNDOS",
+    30,
+    0,
+    3600,
+  ),
+  HUGGINGFACE_TTS_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
+    "HUGGINGFACE_TTS_GLOBAL_COOLDOWN_SEGUNDOS",
+    3,
+    0,
+    60,
+  ),
+  HUGGINGFACE_TTS_LIMITE_DIARIO: numeroEntero(
+    "HUGGINGFACE_TTS_LIMITE_DIARIO",
+    30,
+    1,
+    100_000,
+  ),
+  HUGGINGFACE_TTS_LIMITE_USUARIO_DIARIO: numeroEntero(
+    "HUGGINGFACE_TTS_LIMITE_USUARIO_DIARIO",
+    3,
+    1,
+    10_000,
+  ),
   AI_COOLDOWN_SEGUNDOS: numeroEntero("AI_COOLDOWN_SEGUNDOS", 60, 0, 3600),
   AI_GLOBAL_COOLDOWN_SEGUNDOS: numeroEntero(
     "AI_GLOBAL_COOLDOWN_SEGUNDOS",
@@ -304,6 +355,18 @@ const CONFIG = {
     1,
     10_000,
   ),
+  // EventSub es opcional y se usa solo para follows. El token debe pertenecer
+  // al broadcaster o a un moderador y tener moderator:read:followers.
+  TWITCH_EVENTSUB_TOKEN: process.env.TWITCH_EVENTSUB_TOKEN || null,
+  TWITCH_CLIENT_ID: process.env.TWITCH_CLIENT_ID || null,
+  TWITCH_CLIENT_SECRET: process.env.TWITCH_CLIENT_SECRET || null,
+  TWITCH_BROADCASTER_ID: process.env.TWITCH_BROADCASTER_ID || null,
+  MONGODB_URI: process.env.MONGODB_URI || null,
+  MONGODB_DB_NAME: process.env.MONGODB_DB_NAME || null,
+  TWITCH_TOKEN_COLLECTION:
+    process.env.TWITCH_TOKEN_COLLECTION || "twitch_tokens",
+  TWITCH_TOKEN_DOCUMENT_ID:
+    process.env.TWITCH_TOKEN_DOCUMENT_ID || "broadcaster",
   USAGE_TIMEZONE: process.env.USAGE_TIMEZONE || "America/Bogota",
 };
 
@@ -323,36 +386,44 @@ function validate() {
     );
   }
 
-  if (CONFIG.TTS_PROVIDER === "fish" && !CONFIG.FISH_API_KEY) {
-    log.warn(
-      "TTS_PROVIDER=fish sin FISH_API_KEY; se usara Gemini o Google como respaldo",
-    );
-  }
-
   if (CONFIG.TTS_PROVIDER === "puter" && !CONFIG.PUTER_AUTH_TOKEN) {
     log.warn(
       "TTS_PROVIDER=puter sin PUTER_AUTH_TOKEN; se usara Google Translate como respaldo",
     );
   }
 
+  if (CONFIG.TTS_PROVIDER === "huggingface" && !CONFIG.HUGGINGFACE_TTS_ENDPOINT) {
+    log.warn(
+      "TTS_PROVIDER=huggingface sin HUGGINGFACE_TTS_ENDPOINT; se usara Google Translate",
+    );
+  }
+
   let proveedorEfectivo = "google";
-  if (CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY) {
-    proveedorEfectivo = "fish";
-  } else if (CONFIG.TTS_PROVIDER === "puter" && CONFIG.PUTER_AUTH_TOKEN) {
+  if (CONFIG.TTS_PROVIDER === "puter" && CONFIG.PUTER_AUTH_TOKEN) {
     proveedorEfectivo = "puter";
+  } else if (
+    CONFIG.TTS_PROVIDER === "huggingface" &&
+    CONFIG.HUGGINGFACE_TTS_ENDPOINT
+  ) {
+    proveedorEfectivo = "huggingface";
   } else if (CONFIG.TTS_PROVIDER === "gemini" && CONFIG.GEMINI_API_KEY) {
     proveedorEfectivo = "gemini";
   } else if (CONFIG.TTS_PROVIDER === "auto") {
     if (CONFIG.GEMINI_API_KEY) proveedorEfectivo = "gemini";
     else if (CONFIG.PUTER_AUTH_TOKEN) proveedorEfectivo = "puter";
+    else if (CONFIG.HUGGINGFACE_TTS_ENDPOINT) proveedorEfectivo = "huggingface";
   }
 
   log.info(`Canal: #${CONFIG.CANAL} | Puerto: ${CONFIG.PUERTO}`);
   log.info(
-    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""} | !habla Gemini: ${CONFIG.GEMINI_COAST_VOICE} | Fish: ${CONFIG.FISH_API_KEY ? "configurado" : "sin API key"} | Puter: ${CONFIG.PUTER_AUTH_TOKEN ? `${CONFIG.PUTER_TTS_PROVIDER} configurado` : "sin token"}`,
+    `TTS: ${proveedorEfectivo}${proveedorEfectivo === "gemini" ? ` (${CONFIG.GEMINI_TTS_VOICE})` : ""} | !habla Gemini: ${CONFIG.GEMINI_COAST_VOICE} | Fish alertas: ${CONFIG.FISH_API_KEY ? "configurado" : "sin API key"} | Puter: ${CONFIG.PUTER_AUTH_TOKEN ? `${CONFIG.PUTER_TTS_PROVIDER} configurado` : "sin token"} | Hugging Face: ${CONFIG.HUGGINGFACE_TTS_ENDPOINT ? "configurado" : "sin endpoint"}`,
   );
-  if (!CONFIG.CHAT_TOKEN) {
-    log.warn("CHAT_TOKEN no configurado; /chat quedara abierto con limites antiabuso");
+  if (!CONFIG.PANEL_API_TOKEN) {
+    log.warn(
+      "PANEL_API_TOKEN no configurado; la API privada del panel permanecera cerrada",
+    );
+  } else if (CONFIG.PANEL_API_TOKEN.length < 32) {
+    log.warn("PANEL_API_TOKEN deberia tener al menos 32 caracteres aleatorios");
   }
 }
 

@@ -1,11 +1,11 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { _internals } = require("../src/twitch");
+const twitch = require("../src/twitch");
 
 test("los comandos TTS exigen limite de palabra", () => {
   const habla = _internals.detectarComando("!habla hola");
   const prueba = _internals.detectarComando("!pruebavoz hola");
-  const naruto = _internals.detectarComando("!naruto hola");
   assert.equal(habla.idioma, "es");
   assert.equal(habla.provider, "balanced");
   assert.equal(_internals.detectarComando("!speak hello").idioma, "en");
@@ -14,9 +14,7 @@ test("los comandos TTS exigen limite de palabra", () => {
   assert.equal(prueba.voice, habla.voice);
   assert.equal(prueba.style, habla.style);
   assert.match(prueba.style, /feminine/i);
-  assert.equal(naruto.provider, "fish");
-  assert.equal(naruto.tipo, "naruto");
-  assert.match(naruto.fishReferenceId, /^[a-f0-9]{32}$/);
+  assert.equal(_internals.detectarComando("!naruto hola"), undefined);
   assert.equal(_internals.detectarComando("!hablado esto no es comando"), undefined);
 });
 
@@ -75,21 +73,83 @@ test("!ia Diomedes presenta al usuario y su pregunta antes de responder", () => 
   );
 });
 
-test("!habla alterna Fish y Gemini, luego usa Puter y deja Google al final", () => {
+test("!habla reserva Fish y usa respaldos generales en orden estable", () => {
   const primera = _internals.tomarOrdenHabla();
   const segunda = _internals.tomarOrdenHabla();
-  assert.notEqual(primera[0], segunda[0]);
-  assert.deepEqual(new Set(primera.slice(0, 2)), new Set(["fish", "gemini"]));
-  assert.equal(primera.at(-2), "puter");
-  assert.equal(segunda.at(-2), "puter");
+  assert.deepEqual(primera, ["gemini", "puter", "huggingface", "google"]);
+  assert.deepEqual(segunda, primera);
+  assert.equal(primera.includes("fish"), false);
   assert.equal(primera.at(-1), "google");
-  assert.equal(segunda.at(-1), "google");
 });
 
-test("Gemini y Puter TTS tienen presupuestos independientes de las respuestas IA", () => {
+test("Gemini, Puter y Hugging Face tienen presupuestos independientes", () => {
   assert.equal(_internals.reglaUso("gemini_tts").tipo, "gemini_tts");
   assert.ok(_internals.reglaUso("gemini_tts").limiteDiario > 0);
   assert.equal(_internals.reglaUso("puter_tts").tipo, "puter_tts");
   assert.ok(_internals.reglaUso("puter_tts").limiteDiario > 0);
+  assert.equal(_internals.reglaUso("huggingface_tts").tipo, "huggingface_tts");
+  assert.ok(_internals.reglaUso("huggingface_tts").limiteDiario > 0);
   assert.equal(_internals.reglaUso("ai").tipo, "ai");
+});
+
+test("las alertas asignan Naruto a raids/follows y Diomedes al apoyo", () => {
+  assert.equal(_internals.perfilAlertaEspecial("raid").nombre, "Naruto");
+  assert.equal(_internals.perfilAlertaEspecial("follow").nombre, "Naruto");
+  assert.equal(_internals.perfilAlertaEspecial("sub").nombre, "Diomedes");
+  assert.match(
+    _internals.construirAlertaEspecial({ tipo: "raid", usuario: "Ana", cantidad: 20 }),
+    /Ana.+20 personas/i,
+  );
+});
+
+test("una alerta usa Fish primero y agrupa una rafaga inmediata", () => {
+  const items = [];
+  let generacion;
+  let reglaReservada;
+  const base = Date.now() + 60_000;
+  const servicios = {
+    colaServicio: {
+      total: () => items.length,
+      agregar: (entrada) => {
+        const guardada = { id: `alerta-${items.length + 1}`, ...entrada };
+        items.push(guardada);
+        return guardada;
+      },
+    },
+    usoServicio: {
+      reservarVarios: (reglas) => {
+        [reglaReservada] = reglas;
+        return { ok: true };
+      },
+    },
+    generarTts: (entrada, texto, idioma, opciones) => {
+      generacion = { entrada, texto, idioma, opciones };
+    },
+    notificarCambio: () => {},
+    ahora: () => base,
+  };
+  const primera = twitch.encolarAlertaEspecial(
+    { tipo: "raid", usuario: "Streamer", cantidad: 50, tags: { id: "raid-prueba" } },
+    servicios,
+  );
+  assert.equal(primera.ok, true);
+  assert.equal(primera.voz, "Naruto");
+  assert.equal(items[0].tipo, "alerta");
+  assert.deepEqual(generacion.opciones.providerOrder, [
+    "fish",
+    "gemini",
+    "puter",
+    "huggingface",
+    "google",
+  ]);
+  assert.equal(generacion.opciones.puedeUsarProveedor("fish"), true);
+  assert.equal(reglaReservada.tipo, "fish");
+
+  const segunda = twitch.encolarAlertaEspecial(
+    { tipo: "sub", usuario: "Ana", tags: { id: "sub-prueba" } },
+    { ...servicios, ahora: () => base + 1_000 },
+  );
+  assert.equal(segunda.ok, false);
+  assert.equal(segunda.motivo, "rafaga");
+  assert.equal(items.length, 1);
 });

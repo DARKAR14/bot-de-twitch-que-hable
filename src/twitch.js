@@ -22,7 +22,8 @@ let conectando = false;
 let deteniendo = false;
 let reconnectTimer = null;
 let intentoReconexion = 0;
-let siguienteVozHabla = "fish";
+let ultimaAlertaEspecial = 0;
+const idsAlertas = new Map();
 
 const comandosTts = [
   {
@@ -38,15 +39,6 @@ const comandosTts = [
   { prefijo: CONFIG.PREFIJO_COMANDO_RU, idioma: "ru", flag: "🇷🇺" },
   { prefijo: CONFIG.PREFIJO_COMANDO_PT, idioma: "pt", flag: "🇧🇷" },
   {
-    prefijo: CONFIG.PREFIJO_COMANDO_NARUTO,
-    idioma: "es",
-    flag: "🍥",
-    provider: "fish",
-    tipo: "naruto",
-    fishReferenceId: CONFIG.FISH_NARUTO_REFERENCE_ID,
-    fishAttribution: CONFIG.FISH_NARUTO_ATTRIBUTION,
-  },
-  {
     prefijo: CONFIG.PREFIJO_COMANDO_PRUEBA,
     idioma: "es",
     flag: "🧪",
@@ -58,7 +50,7 @@ const comandosTts = [
 ];
 
 const VOCES_WEB = Object.freeze([
-  { id: "auto", label: "Automática (Fish / Gemini / Puter)" },
+  { id: "auto", label: "Automática (Gemini / Puter / Hugging Face)" },
   { id: "gemini", label: "Gemini costeña" },
   { id: "diomedes", label: "Diomedes · Fish Audio" },
   { id: "naruto", label: "Naruto · Fish Audio" },
@@ -133,17 +125,18 @@ function construirNarracionIa({ usuario, pregunta, respuesta, modoVoz }) {
 }
 
 function tomarOrdenHabla() {
-  const principal = siguienteVozHabla;
-  siguienteVozHabla = principal === "fish" ? "gemini" : "fish";
-  return principal === "fish"
-    ? ["fish", "gemini", "puter", "google"]
-    : ["gemini", "fish", "puter", "google"];
+  return ["gemini", "puter", "huggingface", "google"];
 }
 
 function normalizarIdVozWeb(valor) {
   let id = String(valor || "auto").trim().toLowerCase();
   if (id === "fish") id = "diomedes";
   return VOCES_WEB.some((voz) => voz.id === id) ? id : null;
+}
+
+function normalizarAccionWeb(valor) {
+  const accion = String(valor || "speak").trim().toLowerCase();
+  return ["speak", "ask"].includes(accion) ? accion : null;
 }
 
 function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
@@ -166,7 +159,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "gemini",
-      providerOrder: ["gemini", "puter", "google"],
+      providerOrder: ["gemini", "puter", "huggingface", "google"],
       reserva: "gemini_tts",
       preautorizado: "gemini",
       ...baseGemini,
@@ -176,7 +169,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "fish",
-      providerOrder: ["fish", "gemini", "puter", "google"],
+      providerOrder: ["fish", "gemini", "puter", "huggingface", "google"],
       reserva: "fish",
       preautorizado: "fish",
       fishReferenceId: CONFIG.FISH_REFERENCE_ID,
@@ -188,7 +181,7 @@ function resolverPerfilVozWeb(valor, obtenerOrden = tomarOrdenHabla) {
     return {
       id,
       provider: "fish",
-      providerOrder: ["fish", "gemini", "puter", "google"],
+      providerOrder: ["fish", "gemini", "puter", "huggingface", "google"],
       reserva: "fish",
       preautorizado: "fish",
       fishReferenceId: CONFIG.FISH_NARUTO_REFERENCE_ID,
@@ -237,6 +230,15 @@ function reglaUso(tipo) {
       limiteUsuario: CONFIG.PUTER_TTS_LIMITE_USUARIO_DIARIO,
     };
   }
+  if (tipo === "huggingface_tts") {
+    return {
+      tipo,
+      cooldownMs: CONFIG.HUGGINGFACE_TTS_COOLDOWN_SEGUNDOS * 1000,
+      globalCooldownMs: CONFIG.HUGGINGFACE_TTS_GLOBAL_COOLDOWN_SEGUNDOS * 1000,
+      limiteDiario: CONFIG.HUGGINGFACE_TTS_LIMITE_DIARIO,
+      limiteUsuario: CONFIG.HUGGINGFACE_TTS_LIMITE_USUARIO_DIARIO,
+    };
+  }
   if (tipo === "web_chat") {
     return {
       tipo,
@@ -264,7 +266,12 @@ function reglaUso(tipo) {
   };
 }
 
-function crearControlProveedor(claveUsuario, esMod, preautorizados = []) {
+function crearControlProveedor(
+  claveUsuario,
+  esMod,
+  preautorizados = [],
+  usoServicio = usage,
+) {
   const autorizados = new Set(preautorizados);
   return (provider) => {
     if (autorizados.delete(provider)) return true;
@@ -272,8 +279,10 @@ function crearControlProveedor(claveUsuario, esMod, preautorizados = []) {
       ? "fish"
       : provider === "puter"
         ? "puter_tts"
-        : "gemini_tts";
-    const reserva = usage.reservarVarios([reglaUso(tipo)], {
+        : provider === "huggingface"
+          ? "huggingface_tts"
+          : "gemini_tts";
+    const reserva = usoServicio.reservarVarios([reglaUso(tipo)], {
       usuario: claveUsuario,
       bypassUsuario: esMod,
     });
@@ -356,6 +365,7 @@ async function procesarIa({
   modoVoz,
   entrada,
   puedeUsarProveedor,
+  perfilVoz,
 }) {
   try {
     const respuesta = await ai.generarRespuesta(pregunta, { modoVoz });
@@ -369,27 +379,24 @@ async function procesarIa({
     log.info(
       `🧠 !ia ${modoVoz} | ${usuario}${respuesta.cache ? " (cache)" : ""}: "${respuesta.texto}"`,
     );
-    const usarFish = modoVoz === "fish" || modoVoz === "naruto";
     iniciarGeneracionTts(entrada, narracion, "es", {
       corregirTexto: false,
-      providerOrder: usarFish
-        ? ["fish", "gemini", "puter", "google"]
-        : ["gemini", "fish", "puter", "google"],
+      providerOrder: perfilVoz?.providerOrder || tomarOrdenHabla(),
       puedeUsarProveedor,
-      fishReferenceId:
-        modoVoz === "naruto" ? CONFIG.FISH_NARUTO_REFERENCE_ID : undefined,
-      fishAttribution:
-        modoVoz === "naruto" ? CONFIG.FISH_NARUTO_ATTRIBUTION : undefined,
+      fishReferenceId: perfilVoz?.fishReferenceId,
+      fishAttribution: perfilVoz?.fishAttribution,
       voice: CONFIG.GEMINI_COAST_VOICE,
       style: CONFIG.GEMINI_COAST_STYLE,
     });
   } catch (err) {
     if (queue.eliminar(entrada.id)) playback.notificarCambio();
     log.warn(`No se pudo responder !ia para ${usuario}`, err.message);
-    await decir(
-      channel,
-      `@${usuario} la IA no pudo responder ahora. Intenta de nuevo más tarde.`,
-    );
+    if (channel) {
+      await decir(
+        channel,
+        `@${usuario} la IA no pudo responder ahora. Intenta de nuevo más tarde.`,
+      );
+    }
   }
 }
 
@@ -419,7 +426,13 @@ function mensajeReservaWeb(reserva) {
 }
 
 function encolarDesdeWeb(
-  { name, message, voice = "auto", clientKey = "anonimo" } = {},
+  {
+    name,
+    message,
+    voice = "auto",
+    action = "speak",
+    clientKey = "anonimo",
+  } = {},
   {
     colaServicio = queue,
     usoServicio = usage,
@@ -429,6 +442,7 @@ function encolarDesdeWeb(
     crearControl = crearControlProveedor,
     geminiDisponible = Boolean(CONFIG.GEMINI_API_KEY),
     fishDisponible = Boolean(CONFIG.FISH_API_KEY),
+    procesarPregunta = procesarIa,
   } = {},
 ) {
   const usuario = limpiarCampoWeb(name, CONFIG.CHAT_MAX_NAME);
@@ -437,6 +451,7 @@ function encolarDesdeWeb(
     4,
   );
   const vozId = normalizarIdVozWeb(voice);
+  const accion = normalizarAccionWeb(action);
   if (!usuario) {
     return { ok: false, status: 400, code: "INVALID_NAME", error: "Escribe un nombre." };
   }
@@ -454,6 +469,22 @@ function encolarDesdeWeb(
       status: 400,
       code: "INVALID_VOICE",
       error: "Selecciona una voz válida.",
+    };
+  }
+  if (!accion) {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_ACTION",
+      error: "Selecciona Hablar o Preguntar a la IA.",
+    };
+  }
+  if (accion === "ask" && !geminiDisponible) {
+    return {
+      ok: false,
+      status: 503,
+      code: "AI_UNAVAILABLE",
+      error: "La IA no está configurada en este momento.",
     };
   }
   if (vozId === "gemini" && !geminiDisponible) {
@@ -487,6 +518,7 @@ function encolarDesdeWeb(
     .digest("hex")
     .slice(0, 16)}`;
   const reglas = [reglaUso("web_chat")];
+  if (accion === "ask") reglas.push(reglaUso("ai"));
   if (vozId === "gemini") reglas.push(reglaUso("gemini_tts"));
   if (["diomedes", "naruto"].includes(vozId)) reglas.push(reglaUso("fish"));
   const reserva = usoServicio.reservarVarios(reglas, {
@@ -503,6 +535,48 @@ function encolarDesdeWeb(
   }
 
   const perfil = resolverPerfilVozWeb(vozId, obtenerOrden);
+  const preautorizados = perfil.preautorizado ? [perfil.preautorizado] : [];
+  if (accion === "ask") {
+    const entrada = colaServicio.agregar({
+      usuario: `${usuario} · IA`,
+      mensaje: "Preparando respuesta…",
+      pregunta: texto,
+      idioma: "es",
+      tipo: "ia",
+      origen: "chat",
+      vozSeleccionada: perfil.id,
+    });
+    notificarCambio();
+    const modoVoz = perfil.id === "naruto"
+      ? "naruto"
+      : perfil.id === "diomedes"
+        ? "fish"
+        : "gemini";
+    log.info(`🧠 /chat IA | ${usuario}: "${texto}" | voz: ${perfil.id}`);
+    void procesarPregunta({
+      channel: null,
+      usuario,
+      pregunta: texto,
+      modoVoz,
+      entrada,
+      perfilVoz: perfil,
+      puedeUsarProveedor: crearControl(
+        claveUsuario,
+        false,
+        preautorizados,
+      ),
+    });
+    return {
+      ok: true,
+      status: 202,
+      id: entrada.id,
+      position: colaServicio.total(),
+      name: usuario,
+      message: texto,
+      voice: perfil.id,
+      action: accion,
+    };
+  }
   const entrada = colaServicio.agregar({
     usuario,
     mensaje: texto,
@@ -525,7 +599,7 @@ function encolarDesdeWeb(
     puedeUsarProveedor: crearControl(
       claveUsuario,
       false,
-      perfil.preautorizado ? [perfil.preautorizado] : [],
+      preautorizados,
     ),
     fishReferenceId: perfil.fishReferenceId,
     fishAttribution: perfil.fishAttribution,
@@ -541,6 +615,7 @@ function encolarDesdeWeb(
     name: usuario,
     message: texto,
     voice: perfil.id,
+    action: accion,
   };
 }
 
@@ -612,14 +687,7 @@ async function manejarMensaje(channel, tags, message, self) {
       return;
     }
 
-    const requiereFish =
-      comandoIa.modoVoz === "fish" || comandoIa.modoVoz === "naruto";
-    if (requiereFish && !CONFIG.FISH_API_KEY) {
-      await decir(channel, `@${usuario} la voz Fish todavía no está configurada.`);
-      return;
-    }
     const reglas = [reglaUso("ai")];
-    if (requiereFish) reglas.push(reglaUso("fish"));
     const reserva = usage.reservarVarios(reglas, {
       usuario: claveUsuario,
       bypassUsuario: esMod,
@@ -647,7 +715,7 @@ async function manejarMensaje(channel, tags, message, self) {
       puedeUsarProveedor: crearControlProveedor(
         claveUsuario,
         esMod,
-        requiereFish ? ["fish"] : [],
+        [],
       ),
     });
     return;
@@ -691,23 +759,6 @@ async function manejarMensaje(channel, tags, message, self) {
     return;
   }
 
-  const preautorizados = [];
-  if (comando.provider === "fish") {
-    if (!CONFIG.FISH_API_KEY) {
-      await decir(channel, `@${usuario} la voz Fish todavía no está configurada.`);
-      return;
-    }
-    const reserva = usage.reservarVarios([reglaUso("fish")], {
-      usuario: claveUsuario,
-      bypassUsuario: esMod,
-    });
-    if (!reserva.ok) {
-      await decir(channel, textoRechazoUso(reserva, usuario));
-      return;
-    }
-    preautorizados.push("fish");
-  }
-
   const entrada = queue.agregar({
     usuario,
     mensaje: texto,
@@ -717,7 +768,7 @@ async function manejarMensaje(channel, tags, message, self) {
   if (!esMod) cooldowns.set(claveUsuario, Date.now());
   playback.notificarCambio();
   const providerOrder =
-    comando.provider === "balanced" ? tomarOrdenHabla() : undefined;
+    comando.provider === "google" ? ["google"] : tomarOrdenHabla();
   log.info(
     `${comando.flag} ${comando.prefijo} | ${usuario}: "${texto}"${providerOrder ? ` | preferida: ${providerOrder[0]}` : ""}`,
   );
@@ -731,13 +782,117 @@ async function manejarMensaje(channel, tags, message, self) {
     puedeUsarProveedor: crearControlProveedor(
       claveUsuario,
       esMod,
-      preautorizados,
+      [],
     ),
     fishReferenceId: comando.fishReferenceId,
     fishAttribution: comando.fishAttribution,
     voice: comando.voice,
     style: comando.style,
   });
+}
+
+function construirAlertaEspecial({ tipo, usuario, cantidad = 1, meses = 0 }) {
+  const nombre = limpiarCampoWeb(usuario || "alguien de la comunidad", 40);
+  const total = Math.max(1, Math.min(100_000, Number(cantidad) || 1));
+  const antiguedad = Math.max(1, Math.min(1_000, Number(meses) || 1));
+  if (tipo === "raid") {
+    return `¡Alerta ninja! ${nombre} llegó con una raid de ${total} personas. ¡Denles una gran bienvenida!`;
+  }
+  if (tipo === "follow") {
+    return `¡Nuevo seguidor! ${nombre} se acaba de unir a la comunidad. ¡Bienvenido al parche!`;
+  }
+  if (tipo === "resub") {
+    return `¡Mi gente! ${nombre} renovó su suscripción y ya lleva ${antiguedad} meses apoyando el stream. ¡Muchas gracias!`;
+  }
+  if (tipo === "subgift") {
+    return `${nombre} regaló una suscripción a la comunidad. ¡Qué grande, muchas gracias!`;
+  }
+  if (tipo === "submysterygift") {
+    return `${nombre} acaba de regalar ${total} suscripciones. ¡Se prendió esta comunidad, muchas gracias!`;
+  }
+  if (tipo === "bits") {
+    return `${nombre} apoyó el stream con ${total} bits. ¡Muchas gracias por ese tremendo apoyo!`;
+  }
+  return `${nombre} se acaba de suscribir al canal. ¡Bienvenido a la familia y muchas gracias por el apoyo!`;
+}
+
+function perfilAlertaEspecial(tipo) {
+  const naruto = tipo === "raid" || tipo === "follow";
+  return naruto
+    ? {
+        nombre: "Naruto",
+        referenceId: CONFIG.FISH_NARUTO_REFERENCE_ID,
+        attribution: CONFIG.FISH_NARUTO_ATTRIBUTION,
+      }
+    : {
+        nombre: "Diomedes",
+        referenceId: CONFIG.FISH_REFERENCE_ID,
+        attribution: CONFIG.FISH_ATTRIBUTION,
+      };
+}
+
+function alertaYaProcesada(tags = {}) {
+  const id = tags.id || tags["message-id"];
+  if (!id) return false;
+  const ahora = Date.now();
+  if (idsAlertas.has(id)) return true;
+  idsAlertas.set(id, ahora);
+  for (const [clave, timestamp] of idsAlertas) {
+    if (ahora - timestamp > 10 * 60 * 1000) idsAlertas.delete(clave);
+  }
+  return false;
+}
+
+function encolarAlertaEspecial(
+  alerta,
+  {
+    colaServicio = queue,
+    usoServicio = usage,
+    generarTts = iniciarGeneracionTts,
+    notificarCambio = () => playback.notificarCambio(),
+    ahora = () => Date.now(),
+  } = {},
+) {
+  if (!alerta || alertaYaProcesada(alerta.tags)) return { ok: false, motivo: "duplicada" };
+  const timestamp = ahora();
+  if (
+    CONFIG.ALERTA_GLOBAL_COOLDOWN_SEGUNDOS > 0 &&
+    timestamp - ultimaAlertaEspecial < CONFIG.ALERTA_GLOBAL_COOLDOWN_SEGUNDOS * 1000
+  ) {
+    log.info(`Alerta ${alerta.tipo} agrupada por protección de ráfaga`);
+    return { ok: false, motivo: "rafaga" };
+  }
+  if (colaServicio.total() >= CONFIG.MAX_COLA) return { ok: false, motivo: "cola_llena" };
+
+  const perfil = perfilAlertaEspecial(alerta.tipo);
+  const mensaje = construirAlertaEspecial(alerta);
+  const usuario = limpiarCampoWeb(alerta.usuario || "Comunidad", 40) || "Comunidad";
+  const entrada = colaServicio.agregar({
+    usuario: `${usuario} · ${alerta.tipo}`,
+    mensaje,
+    idioma: "es",
+    tipo: "alerta",
+    origen: "twitch-event",
+    vozSeleccionada: perfil.nombre.toLowerCase(),
+  });
+  ultimaAlertaEspecial = timestamp;
+  notificarCambio();
+  log.info(`🎉 Alerta ${alerta.tipo} | ${usuario} | voz: ${perfil.nombre}`);
+  generarTts(entrada, mensaje, "es", {
+    corregirTexto: false,
+    providerOrder: ["fish", "gemini", "puter", "huggingface", "google"],
+    puedeUsarProveedor: crearControlProveedor(
+      `evento:${alerta.tipo}`,
+      true,
+      [],
+      usoServicio,
+    ),
+    fishReferenceId: perfil.referenceId,
+    fishAttribution: perfil.attribution,
+    voice: CONFIG.GEMINI_COAST_VOICE,
+    style: CONFIG.GEMINI_COAST_STYLE,
+  });
+  return { ok: true, id: entrada.id, voz: perfil.nombre, mensaje };
 }
 
 function programarReconexion(razon) {
@@ -768,6 +923,47 @@ async function conectar() {
   const nuevo = crearCliente();
   client = nuevo;
   nuevo.on("message", manejarMensaje);
+  nuevo.on("subscription", (channel, username, methods, message, tags) => {
+    encolarAlertaEspecial({ tipo: "sub", usuario: username, tags });
+  });
+  nuevo.on("resub", (channel, username, months, message, tags) => {
+    encolarAlertaEspecial({ tipo: "resub", usuario: username, meses: months, tags });
+  });
+  nuevo.on("subgift", (channel, username, streakMonths, recipient, methods, tags) => {
+    encolarAlertaEspecial({ tipo: "subgift", usuario: username, tags });
+  });
+  nuevo.on("anonsubgift", (channel, streakMonths, recipient, methods, tags) => {
+    encolarAlertaEspecial({ tipo: "subgift", usuario: "Alguien anónimo", tags });
+  });
+  nuevo.on("submysterygift", (channel, username, count, methods, tags) => {
+    encolarAlertaEspecial({
+      tipo: "submysterygift",
+      usuario: username,
+      cantidad: count,
+      tags,
+    });
+  });
+  nuevo.on("anonsubmysterygift", (channel, count, methods, tags) => {
+    encolarAlertaEspecial({
+      tipo: "submysterygift",
+      usuario: "Alguien anónimo",
+      cantidad: count,
+      tags,
+    });
+  });
+  nuevo.on("raided", (channel, username, viewers, tags) => {
+    encolarAlertaEspecial({ tipo: "raid", usuario: username, cantidad: viewers, tags });
+  });
+  nuevo.on("cheer", (channel, tags) => {
+    const bits = Number(tags.bits || 0);
+    if (bits < CONFIG.ALERTA_BITS_MINIMOS) return;
+    encolarAlertaEspecial({
+      tipo: "bits",
+      usuario: tags["display-name"] || tags.username,
+      cantidad: bits,
+      tags,
+    });
+  });
   nuevo.on("connected", (addr, port) => {
     intentoReconexion = 0;
     log.info(`Bot conectado a Twitch ${addr}:${port} | #${CONFIG.CANAL}`);
@@ -802,6 +998,7 @@ async function desconectar() {
 module.exports = {
   conectar,
   desconectar,
+  encolarAlertaEspecial,
   encolarDesdeWeb,
   vocesWeb,
   _internals: {
@@ -816,6 +1013,9 @@ module.exports = {
     limpiarCampoWeb,
     mensajeReservaWeb,
     normalizarIdVozWeb,
+    normalizarAccionWeb,
     resolverPerfilVozWeb,
+    construirAlertaEspecial,
+    perfilAlertaEspecial,
   },
 };

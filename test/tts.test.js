@@ -44,17 +44,34 @@ test("Fish recibe un payload estable con proteccion contra repeticiones", () => 
   );
 });
 
-test("la cadena balanceada prueba las voces principales y Puter antes de Google", () => {
+test("Hugging Face recibe el contrato estandar de inferencia TTS", () => {
+  assert.deepEqual(_internals.crearPayloadHuggingFace("hola, comunidad"), {
+    inputs: "hola, comunidad",
+    options: { wait_for_model: true },
+  });
+});
+
+test("la cadena normal nunca usa Fish y deja Google al final", () => {
   assert.deepEqual(_internals.crearOrdenProveedores("balanced"), [
-    "fish",
     "gemini",
     "puter",
+    "huggingface",
     "google",
   ]);
   assert.deepEqual(
-    _internals.crearOrdenProveedores("auto", ["gemini", "fish", "puter"]),
-    ["gemini", "fish", "puter", "google"],
+    _internals.crearOrdenProveedores("auto", ["gemini", "puter", "huggingface"]),
+    ["gemini", "puter", "huggingface", "google"],
   );
+  assert.deepEqual(
+    _internals.crearOrdenProveedores("auto", ["fish", "gemini"]),
+    ["fish", "gemini", "google"],
+  );
+  assert.deepEqual(_internals.crearOrdenProveedores("fish"), [
+    "gemini",
+    "puter",
+    "huggingface",
+    "google",
+  ]);
 });
 
 test("un aborto interrumpe inmediatamente la espera entre reintentos", async () => {

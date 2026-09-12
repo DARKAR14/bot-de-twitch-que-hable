@@ -18,6 +18,8 @@ const twitch = require("./src/twitch");
 const tts = require("./src/tts");
 const ai = require("./src/ai");
 const usage = require("./src/usage");
+const eventsub = require("./src/eventsub");
+const { crearApiPanel, _internals: panelInternals } = require("./src/panel-api");
 
 CONFIG.validate();
 queue.inicializar({ limpiarAlArrancar: true });
@@ -28,6 +30,7 @@ const server = http.createServer(app);
 const INSTANCE_ID = `${process.pid}-${Date.now()}`;
 let pingInterval = null;
 let cerrando = false;
+const panelApi = crearApiPanel(CONFIG);
 
 log.info(`Arrancando instancia ${INSTANCE_ID}`);
 
@@ -43,7 +46,7 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Admin-Token, X-Chat-Token",
+    "Content-Type, Authorization, X-Admin-Token, X-Panel-Token, Idempotency-Key",
   );
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -59,11 +62,14 @@ const apiConfig = {
   voiceRate: CONFIG.TTS_RATE,
   voicePitch: CONFIG.TTS_PITCH,
   ttsProvider:
-    CONFIG.TTS_PROVIDER === "fish" && CONFIG.FISH_API_KEY
-      ? "fish"
-      : CONFIG.TTS_PROVIDER === "google" || !CONFIG.GEMINI_API_KEY
-        ? "google"
-        : "gemini",
+    CONFIG.GEMINI_API_KEY && ["auto", "gemini"].includes(CONFIG.TTS_PROVIDER)
+      ? "gemini"
+      : CONFIG.PUTER_AUTH_TOKEN && ["auto", "puter"].includes(CONFIG.TTS_PROVIDER)
+        ? "puter"
+        : CONFIG.HUGGINGFACE_TTS_ENDPOINT &&
+            ["auto", "huggingface"].includes(CONFIG.TTS_PROVIDER)
+          ? "huggingface"
+          : "google",
   ttsVoice: CONFIG.GEMINI_API_KEY ? CONFIG.GEMINI_COAST_VOICE : null,
 };
 
@@ -88,50 +94,113 @@ app.get("/", (req, res) => {
 
 app.get("/chat", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.sendFile(path.join(__dirname, "chat.html"));
-});
-
-app.get("/api/chat/config", (req, res) => {
-  res.setHeader("Cache-Control", "no-store");
-  res.json({
-    authRequired: Boolean(CONFIG.CHAT_TOKEN),
-    maxName: CONFIG.CHAT_MAX_NAME,
-    maxMessage: CONFIG.MAX_CARACTERES,
-    cooldownSeconds: CONFIG.CHAT_COOLDOWN_SEGUNDOS,
-    voices: twitch.vocesWeb(),
+  if (CONFIG.DASHBOARD_CHAT_URL) return res.redirect(302, CONFIG.DASHBOARD_CHAT_URL);
+  return res.status(410).json({
+    ok: false,
+    code: "CHAT_MOVED_TO_DASHBOARD",
+    error: "El chat se administra desde el panel externo.",
   });
 });
 
-function tokenChatValido(req) {
-  if (!CONFIG.CHAT_TOKEN) return true;
-  const bearer = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  return (
-    bearer === CONFIG.CHAT_TOKEN ||
-    req.headers["x-chat-token"] === CONFIG.CHAT_TOKEN
-  );
+function responderAutenticacionPanel(req, res) {
+  const resultado = panelApi.autenticacion(req);
+  if (resultado.ok) return true;
+  const { status, ...body } = resultado;
+  res.status(status).json(body);
+  return false;
 }
 
-app.post("/api/chat", (req, res) => {
-  if (!tokenChatValido(req)) {
-    return res.status(401).json({
+function capacidadesPanel(req, res) {
+  if (!responderAutenticacionPanel(req, res)) return;
+  res.setHeader("Cache-Control", "no-store");
+  return res.json({
+    ok: true,
+    apiVersion: "1.0",
+    maxName: CONFIG.CHAT_MAX_NAME,
+    maxMessage: CONFIG.MAX_CARACTERES,
+    cooldownSeconds: CONFIG.CHAT_COOLDOWN_SEGUNDOS,
+    actions: ["speak", "ask"],
+    voices: twitch.vocesWeb(),
+  });
+}
+
+function enviarDesdePanel(req, res) {
+  if (!responderAutenticacionPanel(req, res)) return;
+
+  const actorId = panelInternals.normalizarIdActor(req.body?.actorId || req.body?.userId);
+  if (!actorId) {
+    return res.status(400).json({
       ok: false,
-      code: "UNAUTHORIZED",
-      error: "Token del chat incorrecto.",
+      code: "INVALID_ACTOR_ID",
+      error: "actorId es obligatorio y debe identificar al usuario autenticado en el panel.",
     });
   }
 
-  const resultado = twitch.encolarDesdeWeb({
+  const clave = panelInternals.normalizarClaveIdempotencia(
+    req.headers["idempotency-key"],
+  );
+  if (!clave) {
+    return res.status(400).json({
+      ok: false,
+      code: "INVALID_IDEMPOTENCY_KEY",
+      error: "Envía una Idempotency-Key única de 8 a 128 caracteres (se recomienda un UUID).",
+    });
+  }
+
+  const payload = {
+    actorId,
     name: req.body?.name,
     message: req.body?.message,
-    voice: req.body?.voice,
-    clientKey: req.ip,
+    voice: req.body?.voice || "auto",
+    action: req.body?.action || "speak",
+  };
+  const fingerprint = panelApi.huella(payload);
+  const repetida = panelApi.buscarRepetida(clave, fingerprint);
+  if (repetida) return res.status(repetida.status).json(repetida.body);
+
+  const resultado = twitch.encolarDesdeWeb({
+    ...payload,
+    clientKey: `panel:${actorId}`,
   });
   const { status, ...body } = resultado;
   if (resultado.retryAfter) {
     res.setHeader("Retry-After", String(resultado.retryAfter));
   }
-  return res.status(status || 500).json(body);
-});
+  if (!resultado.ok) return res.status(status || 500).json(body);
+
+  const respuesta = panelApi.registrar(clave, fingerprint, status, {
+    ...body,
+    statusUrl: `/api/v1/chat/messages/${encodeURIComponent(body.id)}`,
+  });
+  return res.status(status).json(respuesta);
+}
+
+function estadoEnvioPanel(req, res) {
+  if (!responderAutenticacionPanel(req, res)) return;
+  const registro = panelApi.trabajo(req.params.id);
+  if (!registro) {
+    return res.status(404).json({
+      ok: false,
+      code: "MESSAGE_NOT_FOUND",
+      error: "El envío no existe o salió del historial de idempotencia.",
+    });
+  }
+  const entrada = queue.buscar(req.params.id);
+  return res.json({
+    ok: true,
+    id: req.params.id,
+    state: entrada?.estado || "finalized",
+    position: entrada
+      ? queue.leer().findIndex((item) => item.id === req.params.id) + 1
+      : 0,
+    voice: registro.body.voice,
+    action: registro.body.action,
+  });
+}
+
+app.get(["/api/v1/chat/capabilities", "/api/chat/config"], capacidadesPanel);
+app.post(["/api/v1/chat/messages", "/api/chat"], enviarDesdePanel);
+app.get("/api/v1/chat/messages/:id", estadoEnvioPanel);
 
 app.get("/config", (req, res) => res.sendFile(path.join(__dirname, "config.html")));
 app.use("/font", express.static(path.join(__dirname, "font"), { maxAge: "7d" }));
@@ -157,10 +226,12 @@ app.get("/stats", (req, res) => {
       provider: apiConfig.ttsProvider,
       voice: apiConfig.ttsVoice,
       fishConfigurado: Boolean(CONFIG.FISH_API_KEY && CONFIG.FISH_REFERENCE_ID),
+      huggingFaceConfigurado: Boolean(CONFIG.HUGGINGFACE_TTS_ENDPOINT),
       ...tts.stats(),
     },
     ia: ai.stats(),
     consumo: usage.resumen(),
+    eventsub: eventsub.stats(),
   });
 });
 
@@ -233,6 +304,7 @@ server.listen(CONFIG.PUERTO, () => {
   const url = CONFIG.APP_URL || `http://localhost:${CONFIG.PUERTO}`;
   log.info(`Servidor listo: ${url} | OBS WebSocket: ${url.replace(/^http/, "ws")}/ws`);
   twitch.conectar();
+  eventsub.conectar({ alSeguir: twitch.encolarAlertaEspecial });
 });
 
 if (CONFIG.APP_URL) {
@@ -257,6 +329,7 @@ async function apagar(senal, codigo = 0) {
   if (pingInterval) clearInterval(pingInterval);
   playback.detener();
   ws.cerrar();
+  eventsub.desconectar();
   await twitch.desconectar();
   server.close(() => process.exit(codigo));
   setTimeout(() => process.exit(codigo || 1), 5000).unref?.();

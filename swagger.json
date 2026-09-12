@@ -3,7 +3,7 @@
   "info": {
     "title": "TTS Bot API",
     "version": "1.0.0",
-    "description": "API para enviar TTS privado, ver o limpiar la cola y cambiar el diseño en tiempo real."
+    "description": "API servidor a servidor para que el panel envíe TTS privado, consulte trabajos y administre el overlay."
   },
   "servers": [{ "url": "http://localhost:3000", "description": "Servidor local" }],
   "paths": {
@@ -93,9 +93,10 @@
         }
       }
     },
-    "/api/chat/config": {
+    "/api/v1/chat/capabilities": {
       "get": {
-        "summary": "Obtener configuración pública del chat privado",
+        "summary": "Obtener capacidades del TTS para construir el panel",
+        "security": [{ "PanelToken": [] }],
         "responses": {
           "200": {
             "description": "Límites y estado de autenticación",
@@ -104,18 +105,23 @@
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "authRequired": { "type": "boolean" },
+                    "ok": { "type": "boolean", "example": true },
+                    "apiVersion": { "type": "string", "example": "1.0" },
                     "maxName": { "type": "integer" },
                     "maxMessage": { "type": "integer" },
                     "cooldownSeconds": { "type": "integer" },
+                    "actions": {
+                      "type": "array",
+                      "items": { "type": "string", "enum": ["speak", "ask"] }
+                    },
                     "voices": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "required": ["id", "label"],
                         "properties": {
-                          "id": { "type": "string", "example": "naruto" },
-                          "label": { "type": "string", "example": "Naruto · Fish Audio" }
+                          "id": { "type": "string", "example": "auto" },
+                          "label": { "type": "string", "example": "Gemini costeña" }
                         }
                       }
                     }
@@ -127,19 +133,29 @@
         }
       }
     },
-    "/api/chat": {
+    "/api/v1/chat/messages": {
       "post": {
-        "summary": "Enviar un mensaje privado a OBS",
-        "description": "Recibe {name, message, voice}. OBS muestra name y message; el TTS reproduce únicamente message con el perfil indicado por voice. Puede requerir X-Chat-Token.",
-        "security": [{}, { "ChatToken": [] }],
+        "summary": "Enviar un mensaje o pregunta desde el panel a OBS",
+        "description": "El backend del panel ya validó al usuario. El bot aplica sus límites, genera la voz y encola exactamente una vez por Idempotency-Key.",
+        "security": [{ "PanelToken": [] }],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": { "type": "string", "minLength": 8, "maxLength": 128 },
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["name", "message"],
+                "required": ["actorId", "name", "message"],
                 "properties": {
+                  "actorId": { "type": "string", "example": "twitch:123456789" },
                   "name": { "type": "string", "example": "Invitado secreto" },
                   "message": { "type": "string", "example": "Este texto se escucha en OBS" },
                   "voice": {
@@ -147,6 +163,12 @@
                     "enum": ["auto", "gemini", "diomedes", "naruto", "google"],
                     "default": "auto",
                     "example": "naruto"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": ["speak", "ask"],
+                    "default": "speak",
+                    "example": "speak"
                   }
                 }
               }
@@ -154,11 +176,31 @@
           }
         },
         "responses": {
-          "202": { "description": "Mensaje agregado a la cola" },
+          "202": { "description": "Mensaje agregado o reintento idempotente del mismo trabajo" },
           "400": { "description": "Campos inválidos" },
-          "401": { "description": "Token incorrecto" },
+          "401": { "description": "Credencial del panel incorrecta" },
+          "409": { "description": "Idempotency-Key reutilizada con otro contenido" },
           "429": { "description": "Cooldown, presupuesto agotado o cola llena" },
           "503": { "description": "La voz seleccionada no está configurada" }
+        }
+      }
+    },
+    "/api/v1/chat/messages/{id}": {
+      "get": {
+        "summary": "Consultar el estado de un envío reciente",
+        "security": [{ "PanelToken": [] }],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Estado: generando, listo o finalized" },
+          "401": { "description": "Credencial del panel incorrecta" },
+          "404": { "description": "Trabajo inexistente o fuera del historial" }
         }
       }
     },
@@ -245,10 +287,11 @@
   },
   "components": {
     "securitySchemes": {
-      "ChatToken": {
+      "PanelToken": {
         "type": "apiKey",
         "in": "header",
-        "name": "X-Chat-Token"
+        "name": "X-Panel-Token",
+        "description": "Secreto exclusivo entre el backend del panel y el bot. También se acepta como Bearer token."
       }
     }
   }

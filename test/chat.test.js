@@ -1,6 +1,4 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
 const twitch = require("../src/twitch");
 
@@ -37,7 +35,7 @@ test("/chat separa el nombre visual del mensaje que recibe el TTS", () => {
       generarTts: (entrada, texto, idioma, opciones) => {
         generacion = { entrada, texto, idioma, opciones };
       },
-      obtenerOrden: () => ["gemini", "fish", "puter", "google"],
+      obtenerOrden: () => ["gemini", "puter", "huggingface", "google"],
       crearControl: () => () => true,
     },
   );
@@ -54,34 +52,65 @@ test("/chat separa el nombre visual del mensaje que recibe el TTS", () => {
   assert.equal(generacion.idioma, "es");
   assert.deepEqual(generacion.opciones.providerOrder, [
     "gemini",
-    "fish",
     "puter",
+    "huggingface",
     "google",
   ]);
   assert.equal(resultado.voice, "auto");
+  assert.equal(resultado.action, "speak");
   assert.equal(notificaciones, 1);
 });
 
-test("/chat aplica Naruto por identificador sin incluir comandos en el mensaje", () => {
-  let entradaAgregada;
-  let generacion;
-  let reglasReservadas;
-  let controlCreado;
+test("/chat permite Diomedes y Naruto con presupuesto Fish", () => {
+  for (const voice of ["diomedes", "naruto"]) {
+    let reglasReservadas;
+    let generacion;
+    const resultado = twitch.encolarDesdeWeb(
+      { name: "Oculto", message: "Bienvenidos", voice },
+      {
+        colaServicio: {
+          total: () => 0,
+          agregar: (entrada) => ({ id: `chat-${voice}`, ...entrada }),
+        },
+        usoServicio: {
+          reservarVarios: (reglas) => {
+            reglasReservadas = reglas;
+            return { ok: true };
+          },
+        },
+        notificarCambio: () => {},
+        generarTts: (entrada, texto, idioma, opciones) => {
+          generacion = { entrada, texto, idioma, opciones };
+        },
+        crearControl: () => () => true,
+        fishDisponible: true,
+      },
+    );
+    assert.equal(resultado.ok, true);
+    assert.equal(resultado.voice, voice);
+    assert.deepEqual(reglasReservadas.map(({ tipo }) => tipo), ["web_chat", "fish"]);
+    assert.equal(generacion.opciones.providerOrder[0], "fish");
+  }
+});
+
+test("/chat puede preguntar a la IA con la voz seleccionada", () => {
   const items = [];
+  let solicitudIa;
+  let reglasReservadas;
   const resultado = twitch.encolarDesdeWeb(
     {
-      name: "Oculto",
-      message: "Bienvenidos al stream",
-      voice: "naruto",
-      clientKey: "198.51.100.10",
+      name: "Darkar",
+      message: "por que el vallenato tiene acordeon",
+      voice: "diomedes",
+      action: "ask",
     },
     {
       colaServicio: {
         total: () => items.length,
         agregar: (entrada) => {
-          entradaAgregada = { id: "chat-naruto", ...entrada };
-          items.push(entradaAgregada);
-          return entradaAgregada;
+          const guardada = { id: "pregunta-1", ...entrada };
+          items.push(guardada);
+          return guardada;
         },
       },
       usoServicio: {
@@ -91,35 +120,23 @@ test("/chat aplica Naruto por identificador sin incluir comandos en el mensaje",
         },
       },
       notificarCambio: () => {},
-      generarTts: (entrada, texto, idioma, opciones) => {
-        generacion = { entrada, texto, idioma, opciones };
-      },
-      crearControl: (usuario, esMod, preautorizados) => {
-        controlCreado = { usuario, esMod, preautorizados };
-        return () => true;
-      },
+      crearControl: () => () => true,
+      procesarPregunta: (solicitud) => { solicitudIa = solicitud; },
+      geminiDisponible: true,
       fishDisponible: true,
     },
   );
-
   assert.equal(resultado.ok, true);
-  assert.equal(resultado.voice, "naruto");
-  assert.equal(entradaAgregada.vozSeleccionada, "naruto");
-  assert.equal(entradaAgregada.mensaje, "Bienvenidos al stream");
-  assert.deepEqual(reglasReservadas.map(({ tipo }) => tipo), ["web_chat", "fish"]);
-  assert.deepEqual(generacion.opciones.providerOrder, [
+  assert.equal(resultado.action, "ask");
+  assert.equal(items[0].tipo, "ia");
+  assert.equal(items[0].mensaje, "Preparando respuesta…");
+  assert.equal(solicitudIa.modoVoz, "fish");
+  assert.equal(solicitudIa.perfilVoz.providerOrder[0], "fish");
+  assert.deepEqual(reglasReservadas.map(({ tipo }) => tipo), [
+    "web_chat",
+    "ai",
     "fish",
-    "gemini",
-    "puter",
-    "google",
   ]);
-  assert.equal(
-    generacion.opciones.fishReferenceId,
-    "1412b58e859448d284f8f62391e82bd9",
-  );
-  assert.equal(generacion.texto, "Bienvenidos al stream");
-  assert.doesNotMatch(generacion.texto, /!naruto/i);
-  assert.deepEqual(controlCreado.preautorizados, ["fish"]);
 });
 
 test("el selector publica IDs estables y resuelve todos los perfiles", () => {
@@ -129,7 +146,7 @@ test("el selector publica IDs estables y resuelve todos los perfiles", () => {
     ["auto", "gemini", "diomedes", "naruto", "google"],
   );
 
-  const ordenAuto = ["gemini", "fish", "puter", "google"];
+  const ordenAuto = ["gemini", "puter", "huggingface", "google"];
   const perfiles = Object.fromEntries(
     voces.map(({ id }) => [
       id,
@@ -137,7 +154,7 @@ test("el selector publica IDs estables y resuelve todos los perfiles", () => {
     ]),
   );
   assert.deepEqual(perfiles.auto.providerOrder, ordenAuto);
-  assert.deepEqual(perfiles.gemini.providerOrder, ["gemini", "puter", "google"]);
+  assert.deepEqual(perfiles.gemini.providerOrder, ordenAuto);
   assert.equal(perfiles.diomedes.providerOrder[0], "fish");
   assert.equal(perfiles.naruto.providerOrder[0], "fish");
   assert.deepEqual(perfiles.google.providerOrder, ["google"]);
@@ -162,18 +179,10 @@ test("/chat rechaza campos vacios y limpia controles invisibles", () => {
     "A na",
   );
   assert.equal(twitch._internals.normalizarIdVozWeb("fish"), "diomedes");
-  assert.equal(
+  assert.equal(twitch._internals.normalizarAccionWeb("ask"), "ask");
+  assert.equal(twitch._internals.normalizarAccionWeb("inventada"), null);
+  assert.match(
     twitch._internals.resolverPerfilVozWeb("naruto").fishReferenceId,
-    "1412b58e859448d284f8f62391e82bd9",
+    /^[a-f0-9]{32}$/,
   );
-});
-
-test("la pagina /chat envia name, message y el identificador de voz", () => {
-  const html = fs.readFileSync(path.join(__dirname, "../chat.html"), "utf8");
-  assert.match(html, /fetch\('\/api\/chat'/);
-  assert.match(html, /JSON\.stringify\(\{ name, message, voice \}\)/);
-  assert.match(html, /id="name"/);
-  assert.match(html, /id="message"/);
-  assert.match(html, /id="voice"/);
-  assert.match(html, /escribe solamente el mensaje/i);
 });

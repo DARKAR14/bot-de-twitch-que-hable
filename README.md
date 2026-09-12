@@ -8,15 +8,15 @@ Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordena
 - Confirmaciones idempotentes: un ACK repetido no puede avanzar dos veces la cola.
 - Deduplicacion por ID real del mensaje de Twitch.
 - Cola local en memoria con escritura atomica a `data/queue.json`.
-- `!habla` alterna entre Gemini TTS y Fish Audio, prueba Puter y deja Google como respaldo final.
+- `!habla` usa Gemini, luego Puter, un endpoint opcional de Hugging Face y Google.
 - `!ia` responde preguntas breves, interpreta errores ortograficos y habla la respuesta.
 - Los mensajes normales se corrigen antes de generar el audio (tildes, puntuacion y abreviaturas), pero OBS conserva el texto original. Si el corrector falla o alcanza su limite, la cola sigue con el mensaje original.
-- Perfil Naruto independiente para `!naruto` y `!ia naruto`.
-- Chat privado en `/chat` para enviar TTS a OBS sin escribir en Twitch.
+- Fish (Diomedes/Naruto) queda reservado para alertas especiales y solicitudes autorizadas del panel.
+- API privada para que tu panel envíe TTS a OBS sin escribir en Twitch.
 - Limites diarios persistentes, enfriamiento por usuario, control de rafagas y cache.
-- Respaldos automaticos con Puter, Google Translate TTS y, si todo falla, voz del navegador.
+- Respaldos automaticos con Puter, Hugging Face opcional, Google Translate TTS y, si todo falla, voz del navegador.
 - Espanol, ingles, japones, ruso y portugues.
-- Sin MongoDB, Mongoose ni servicios de persistencia externos.
+- La cola funciona sin base de datos; MongoDB es opcional únicamente para obtener/renovar el token de follows por EventSub.
 
 ## Requisitos
 
@@ -24,7 +24,7 @@ Bot de Twitch que convierte comandos del chat en audio, mantiene una cola ordena
 - Una cuenta de Twitch para el bot.
 - OBS Studio.
 - API key de Gemini para la voz natural y `!ia`.
-- API key de Fish Audio para la rotacion de `!habla` y `!ia diomedes`.
+- API key de Fish Audio para alertas especiales de subs, regalos, raids, follows y bits.
 - Opcional: una cuenta de Puter para habilitar un respaldo TTS adicional.
 
 ## Instalacion
@@ -57,7 +57,7 @@ GEMINI_TTS_VOICE=Aoede
 GEMINI_TTS_STYLE="cheerful, warm, spontaneous and natural Colombian woman from the Caribbean coast, with a subtle costeño accent"
 ```
 
-`auto` usa Gemini cuando existe una clave. Si Gemini falla por cuota, timeout o un error temporal, el bot prueba Puter cuando esta configurado y finalmente Google Translate. Sin Gemini ni Puter, Google es el proveedor normal.
+`auto` usa Gemini cuando existe una clave. Si falla, prueba Puter, un endpoint de Hugging Face cuando esté configurado y finalmente Google Translate. Fish no participa en mensajes normales del chat.
 
 La voz, modelo y estilo se pueden cambiar con `GEMINI_TTS_VOICE`, `GEMINI_TTS_MODEL` y `GEMINI_TTS_STYLE`.
 
@@ -76,13 +76,13 @@ FISH_TTS_MODEL=s2.1-pro-free
 FISH_NARUTO_REFERENCE_ID=1412b58e859448d284f8f62391e82bd9
 ```
 
-El backend identifica esta salida como una voz IA no oficial y entrega la atribucion al dashboard mediante WebSocket, sin mostrarla dentro del overlay de OBS. Si Fish falla o alcanza su cuota, el circuito se pausa temporalmente y el audio prueba Gemini, Puter y finalmente Google.
+El backend identifica esta salida como una voz IA no oficial y entrega la atribucion al dashboard mediante WebSocket, sin mostrarla dentro del overlay de OBS. Diomedes se usa para subs, resubs, regalos y bits; Naruto para raids y follows. Una proteccion global agrupa rafagas de regalos para no consumir la cuota de golpe. Si Fish falla, la alerta prueba los respaldos generales.
 
-`!ia` usa `gemini-3.5-flash-lite` para entender la pregunta, incluso con faltas de ortografia, y genera una respuesta corta con escritura correcta y un tono costeno natural. La personalidad de Gemini es original y no se presenta como una imitacion de una persona real. En el modo Diomedes, la narracion comienza con `Aqui mi compae {usuario} me pregunta: {pregunta}` y luego reproduce la respuesta.
+`!ia` usa `gemini-3.5-flash-lite` para entender la pregunta y genera una respuesta corta con escritura correcta. Los selectores antiguos `diomedes` y `naruto` conservan el estilo de respuesta, pero el audio se genera con la cadena normal y no consume Fish.
 
 ## Puter como respaldo
 
-Puter se ejecuta en el backend de Render y queda despues de Fish/Gemini pero antes de Google. De forma predeterminada utiliza xAI con la voz femenina `ara`, cálida y conversacional, mediante la cuenta Puter. Esto aporta diversidad real de proveedor si las cuotas principales fallan. No cambia los comandos ni requiere autenticar a los espectadores de Twitch.
+Puter se ejecuta en el backend de Render y queda después de Gemini pero antes de Hugging Face y Google. De forma predeterminada utiliza xAI con la voz femenina `ara`, cálida y conversacional, mediante la cuenta Puter.
 
 Obtiene el token una sola vez desde tu computador:
 
@@ -115,20 +115,54 @@ PUTER_TTS_LIMITE_USUARIO_DIARIO=3
 
 Si Puter no tiene saldo, su token expiro o la solicitud se cuelga, el trabajo se cancela dentro del timeout general y la cola continua inmediatamente con Google. Se recomienda conservar `TTS_PROVIDER=auto` para mantener toda la cadena de respaldo.
 
+## Hugging Face como respaldo opcional
+
+Hugging Face solo se activa si tienes un Endpoint o Space TTS propio que acepte JSON con `inputs` y devuelva audio. Fish S1 no dispone actualmente de inferencia serverless directa, por lo que un token de Hugging Face por sí solo no habilita esta ruta:
+
+```env
+HUGGINGFACE_TOKEN=hf_token_privado
+HUGGINGFACE_TTS_ENDPOINT=https://tu-endpoint.example
+```
+
+Si el endpoint tiene arranque en frío, límite o un error, el bot continúa con Google sin bloquear la cola.
+
+## Alertas especiales y follows
+
+Subs, resubs, regalos, raids y bits llegan por el cliente de chat existente. Para follows, usa un token de usuario del broadcaster o de un moderador con `moderator:read:followers`. Puede venir directamente del entorno:
+
+```env
+TWITCH_EVENTSUB_TOKEN=token_sin_publicar
+TWITCH_CLIENT_ID=
+TWITCH_CLIENT_SECRET=
+TWITCH_BROADCASTER_ID=
+```
+
+O puede leerse desde MongoDB usando un documento con `_id`, `access_token`, `refresh_token`, `expires_at` y `updated_at`:
+
+```env
+MONGODB_URI=mongodb+srv://...
+MONGODB_DB_NAME=nombre_db
+TWITCH_TOKEN_COLLECTION=twitch_tokens
+TWITCH_TOKEN_DOCUMENT_ID=broadcaster
+TWITCH_CLIENT_ID=client_id_de_la_app
+TWITCH_CLIENT_SECRET=client_secret_de_la_app
+```
+
+MongoDB se abre únicamente al preparar EventSub y se cierra después. Si el token está próximo a vencer, el bot usa `refresh_token` y actualiza el mismo documento. El ID del canal se resuelve desde `CANAL` cuando `TWITCH_BROADCASTER_ID` está vacío. Las raids y follows usan Naruto; las demás alertas usan Diomedes.
+
 ## Comandos
 
 | Comando | Idioma |
 |---|---|
-| `!habla texto` | Espanol; alterna Fish/Gemini, luego Puter y finalmente Google |
+| `!habla texto` | Español; Gemini, Puter, Hugging Face opcional y Google |
 | `!speak text` | Ingles |
 | `!onichan texto` | Japones |
 | `!sukablad texto` | Ruso |
 | `!cr7 texto` | Portugues |
-| `!naruto texto` | Voz comunitaria Naruto mediante Fish Audio |
 | `!ia pregunta` | Respuesta IA con voz Gemini |
 | `!ia gemini pregunta` | Respuesta IA con voz Gemini |
-| `!ia diomedes pregunta` | Presenta al usuario y la pregunta, luego responde con voz Fish (`diomedez` tambien se acepta) |
-| `!ia naruto pregunta` | Respuesta IA con voz Naruto de Fish |
+| `!ia diomedes pregunta` | Estilo parrandero, reproducido por la cadena normal (`diomedez` también se acepta) |
+| `!ia naruto pregunta` | Estilo anime original, reproducido por la cadena normal |
 | `!pruebavoz texto` | Fuerza la voz Gemini costena; solo mods |
 | `!cola` | Estado de la cola, solo mods |
 | `!limpiar` | Cancela el audio y limpia la cola, solo mods |
@@ -149,17 +183,52 @@ En un servidor publico puedes definir `WS_TOKEN` y agregarlo a la URL de OBS:
 https://tu-servidor.example/?token=el_mismo_WS_TOKEN
 ```
 
-## Chat privado
+## Integración con el panel
 
-Abre `http://localhost:3000/chat` o `https://tu-servidor.onrender.com/chat`. El formulario permite elegir `Automática`, `Gemini`, `Diomedes`, `Naruto` o `Google`, y envia un objeto con los campos `name`, `message` y `voice`. OBS muestra el nombre y el mensaje, pero el motor TTS recibe y reproduce solamente `message`. No escribas `!naruto` ni otro comando en el texto: el selector envia el identificador de voz (`auto`, `gemini`, `diomedes`, `naruto` o `google`) y el servidor aplica la configuracion interna. Este flujo no escribe nada en Twitch.
+El bot no inicia sesión contra tu backend ni necesita conocer sus usuarios o permisos. Tu panel autentica al usuario y su **backend** llama a esta API privada. El secreto nunca debe enviarse desde el navegador.
 
-En Render es recomendable protegerlo:
+Configura en Render:
 
 ```env
-CHAT_TOKEN=un_secreto_largo_y_distinto
+DASHBOARD_ORIGIN=https://tu-panel.example
+DASHBOARD_CHAT_URL=https://tu-panel.example/tts
+PANEL_API_TOKEN=un_secreto_aleatorio_largo_y_exclusivo
+PANEL_IDEMPOTENCY_TTL_HOURS=24
 ```
 
-La pagina mostrara un campo para el token. Tambien se puede abrir una vez con `/chat?token=...`; el valor se copia al formulario y se retira inmediatamente de la barra de direcciones. Si `CHAT_TOKEN` queda vacio, la ruta funciona sin autenticacion pero conserva cooldown, limite por cliente, limite diario y cola maxima.
+Puedes generar el secreto con `openssl rand -hex 32` o cualquier generador criptográfico equivalente. Debe existir con el mismo valor en Render y en las variables privadas del backend de tu panel.
+
+El backend del panel consulta `GET /api/v1/chat/capabilities` para construir los selectores. Para enviar usa `POST /api/v1/chat/messages` con `Authorization: Bearer <PANEL_API_TOKEN>` y una `Idempotency-Key` nueva por cada clic (se recomienda un UUID). Si el panel reintenta la misma solicitud con la misma clave, el bot devuelve el trabajo original con `replayed: true` y no duplica el audio.
+
+Ejemplo de cuerpo:
+
+```json
+{
+  "actorId": "twitch:123456789",
+  "name": "Darkar",
+  "message": "Buenas noches, mi gente",
+  "voice": "diomedes",
+  "action": "speak"
+}
+```
+
+`actorId` es el identificador interno o de Twitch del usuario ya autenticado por tu panel; se usa únicamente para límites y auditoría local. `action` acepta `speak` o `ask`. Las voces se obtienen dinámicamente desde capabilities. El estado se consulta en la URL `statusUrl` devuelta por el POST.
+
+Ejemplo desde el **servidor** del panel:
+
+```js
+const response = await fetch(`${process.env.TTS_BOT_URL}/api/v1/chat/messages`, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${process.env.TTS_BOT_PANEL_TOKEN}`,
+    "Idempotency-Key": crypto.randomUUID(),
+  },
+  body: JSON.stringify({ actorId, name, message, voice, action }),
+});
+```
+
+No uses `PANEL_API_TOKEN` dentro de React, Vue, Angular ni cualquier bundle público. `/chat` redirige a `DASHBOARD_CHAT_URL`; si no se configura, responde `410` para indicar que la interfaz vive en el panel.
 
 ## Endpoints
 
@@ -167,16 +236,17 @@ La pagina mostrara un campo para el token. Tambien se puede abrir una vez con `/
 |---|---|---|
 | GET | `/` | Overlay OBS |
 | GET | `/config` | Panel visual |
-| GET | `/chat` | Formulario privado para enviar TTS sin Twitch |
-| GET | `/api/chat/config` | Limites, voces disponibles y estado de autenticacion del chat |
-| POST | `/api/chat` | Recibe `{ name, message, voice }` y lo agrega a la cola |
+| GET | `/chat` | Redirige al chat del panel configurado |
+| GET | `/api/v1/chat/capabilities` | Límites, acciones y voces disponibles; requiere token del panel |
+| POST | `/api/v1/chat/messages` | Recibe `{ actorId, name, message, voice, action }`; requiere token e idempotencia |
+| GET | `/api/v1/chat/messages/:id` | Estado de un envío reciente; requiere token del panel |
 | GET | `/cola` o `/api/cola` | Cola sin rutas internas |
 | DELETE | `/cola` | Cancela y limpia la cola |
 | GET | `/stats` | Estado de cola, playback y WebSocket |
 | GET/POST | `/api/config` | Apariencia y fallback del navegador |
 | POST | `/admin/servicio/:accion` | Control Render; requiere `ADMIN_TOKEN` |
 
-Las acciones administrativas aceptan `Authorization: Bearer <ADMIN_TOKEN>` o `X-Admin-Token`.
+La API del panel acepta `Authorization: Bearer <PANEL_API_TOKEN>` o `X-Panel-Token`. Los alias anteriores `/api/chat/config` y `/api/chat` siguen disponibles durante la migración, pero aplican la misma autenticación e idempotencia. Las acciones administrativas aceptan `Authorization: Bearer <ADMIN_TOKEN>` o `X-Admin-Token`.
 
 `/stats` tambien informa cache, circuitos temporales y consumo diario. Los valores `FISH_*_LIMITE_*`, `GEMINI_TTS_*_LIMITE_*`, `PUTER_TTS_*_LIMITE_*` y `AI_*_LIMITE_*` permiten ajustar el presupuesto. Los moderadores omiten el limite individual, pero no el limite diario ni el control global de rafagas.
 
